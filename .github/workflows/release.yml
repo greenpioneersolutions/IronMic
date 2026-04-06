@@ -43,7 +43,7 @@ jobs:
 
       - name: Build frontend
         working-directory: electron-app
-        run: npx vite build
+        run: npm run build
 
       - name: Package
         working-directory: electron-app
