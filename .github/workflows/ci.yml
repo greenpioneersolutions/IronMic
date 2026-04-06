@@ -65,4 +65,4 @@ jobs:
 
       - name: Build
         working-directory: electron-app
-        run: npx vite build
+        run: npm run build
