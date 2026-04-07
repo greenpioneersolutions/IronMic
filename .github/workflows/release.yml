@@ -45,6 +45,7 @@ jobs:
         run: npm ci
 
       - name: Download bundled TTS voices
+        shell: bash
         run: |
           mkdir -p rust-core/models/voices
           VOICE_BASE="https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices"
