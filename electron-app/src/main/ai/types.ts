@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'child_process';
 
-export type AIProvider = 'copilot' | 'claude';
+export type AIProvider = 'copilot' | 'claude' | 'local';
 
 export interface AuthStatus {
   installed: boolean;
@@ -13,6 +13,7 @@ export interface AuthStatus {
 export interface AIAuthState {
   copilot: AuthStatus;
   claude: AuthStatus;
+  local: AuthStatus;
 }
 
 export interface ChatMessage {
@@ -28,15 +29,20 @@ export interface ParsedOutput {
   content: string;
 }
 
-export interface ICLIAdapter {
+/** Base adapter interface for all AI providers. */
+export interface IAIAdapter {
   name: AIProvider;
   isInstalled(): Promise<boolean>;
   isAuthenticated(): Promise<boolean>;
   getVersion(): Promise<string | null>;
   getBinaryPath(): Promise<string | null>;
+  availableModels(): AIModel[];
+}
+
+/** Extended adapter interface for CLI-based providers (Copilot, Claude). */
+export interface ICLIAdapter extends IAIAdapter {
   buildArgs(prompt: string, continueSession: boolean, model?: string): string[];
   parseOutput(data: string): ParsedOutput;
-  availableModels(): AIModel[];
 }
 
 export interface AIModel {

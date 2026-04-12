@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type AIProvider = 'copilot' | 'claude';
+export type AIProvider = 'copilot' | 'claude' | 'local';
 
 export interface ChatMessage {
   id: string;

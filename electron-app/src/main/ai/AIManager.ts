@@ -1,34 +1,52 @@
 /**
- * AIManager — orchestrates CLI adapters, auth status, and chat sessions.
- * Spawns headless CLI subprocesses per turn (ClearPath pattern).
+ * AIManager — orchestrates CLI adapters, local LLM, auth status, and chat sessions.
+ * CLI providers spawn headless subprocesses per turn (ClearPath pattern).
+ * The local provider calls Rust N-API directly for on-device inference.
  */
 
 import { spawn, ChildProcess } from 'child_process';
 import { BrowserWindow } from 'electron';
 import { CopilotAdapter } from './CopilotAdapter';
 import { ClaudeAdapter } from './ClaudeAdapter';
-import type { AIProvider, AuthStatus, AIAuthState, ChatMessage, ICLIAdapter, AIModel } from './types';
+import { LocalLLMAdapter, getChatModelPath } from './LocalLLMAdapter';
+import { llmSubprocess } from './LlmSubprocess';
+import { CHAT_LLM_MODELS } from '../../shared/constants';
+import type { AIProvider, AuthStatus, AIAuthState, ChatMessage, ICLIAdapter, IAIAdapter, AIModel } from './types';
 
 const AUTH_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/** Maximum number of conversation history messages to keep for local LLM context. */
+const MAX_HISTORY_MESSAGES = 20;
 
 export class AIManager {
   private copilot = new CopilotAdapter();
   private claude = new ClaudeAdapter();
+  private local = new LocalLLMAdapter();
   private authCache: Partial<Record<AIProvider, AuthStatus>> = {};
   private turnCount = 0;
   private activeProcess: ChildProcess | null = null;
 
-  private getAdapter(provider: AIProvider): ICLIAdapter {
+  /** Conversation history for the local LLM (managed in-app since there's no CLI session). */
+  private localHistory: Array<{ role: string; content: string }> = [];
+
+  private getAdapter(provider: AIProvider): IAIAdapter {
+    if (provider === 'local') return this.local;
     return provider === 'copilot' ? this.copilot : this.claude;
   }
 
-  /** Check auth status for both providers. Uses cache. */
+  private getCLIAdapter(provider: AIProvider): ICLIAdapter {
+    if (provider === 'copilot') return this.copilot;
+    return this.claude;
+  }
+
+  /** Check auth status for all providers. Uses cache. */
   async getAuthState(): Promise<AIAuthState> {
-    const [copilot, claude] = await Promise.all([
+    const [copilot, claude, local] = await Promise.all([
       this.checkAuth('copilot'),
       this.checkAuth('claude'),
+      this.checkAuth('local'),
     ]);
-    return { copilot, claude };
+    return { copilot, claude, local };
   }
 
   /** Force re-check auth for a provider. */
@@ -76,20 +94,25 @@ export class AIManager {
 
   /** Get all available models across all providers. */
   getAllModels(): AIModel[] {
-    return [...this.copilot.availableModels(), ...this.claude.availableModels()];
+    return [
+      ...this.copilot.availableModels(),
+      ...this.claude.availableModels(),
+      ...this.local.availableModels(),
+    ];
   }
 
-  /** Pick the best available provider. Prefers Claude, falls back to Copilot. */
+  /** Pick the best available provider. Prefers Claude, then Copilot, then Local. */
   async pickProvider(): Promise<AIProvider | null> {
     const state = await this.getAuthState();
     if (state.claude.authenticated) return 'claude';
     if (state.copilot.authenticated) return 'copilot';
+    if (state.local.authenticated) return 'local';
     return null;
   }
 
   /**
    * Send a message to the AI and stream the response.
-   * Spawns a headless CLI process per turn.
+   * Routes to CLI subprocess for copilot/claude, or Rust N-API for local.
    */
   async sendMessage(
     prompt: string,
@@ -97,7 +120,102 @@ export class AIManager {
     window: BrowserWindow | null,
     model?: string,
   ): Promise<string> {
-    const adapter = this.getAdapter(provider);
+    if (provider === 'local') {
+      return this.sendLocalMessage(prompt, window, model);
+    }
+    return this.sendCLIMessage(prompt, provider, window, model);
+  }
+
+  /**
+   * Send a message via local LLM subprocess.
+   */
+  private async sendLocalMessage(
+    prompt: string,
+    window: BrowserWindow | null,
+    model?: string,
+  ): Promise<string> {
+    const modelId = model || 'llm';
+    const modelMeta = CHAT_LLM_MODELS.find((m) => m.id === modelId);
+    if (!modelMeta) {
+      throw new Error(`Unknown local LLM model: ${modelId}`);
+    }
+
+    if (!llmSubprocess.isAvailable()) {
+      throw new Error('Local LLM binary not found. Build with: cargo build --release --bin ironmic-llm --features llm-bin');
+    }
+
+    const modelPath = getChatModelPath(modelId);
+    const modelType = modelMeta.modelType;
+
+    this.localHistory.push({ role: 'user', content: prompt });
+
+    if (this.localHistory.length > MAX_HISTORY_MESSAGES) {
+      this.localHistory = this.localHistory.slice(-MAX_HISTORY_MESSAGES);
+    }
+
+    const messages = [
+      { role: 'system', content: 'You are a helpful AI assistant running locally on the user\'s device. Be concise and helpful.' },
+      ...this.localHistory,
+    ];
+
+    if (window && !window.isDestroyed()) {
+      window.webContents.send('ai:turn-start', { provider: 'local' });
+    }
+
+    try {
+      const result = await llmSubprocess.chatComplete(
+        {
+          modelPath,
+          modelType,
+          messages,
+          maxTokens: 2048,
+          temperature: 0.3,
+        },
+        (token) => {
+          if (window && !window.isDestroyed()) {
+            window.webContents.send('ai:output', {
+              provider: 'local',
+              type: 'text',
+              content: token,
+            });
+          }
+        },
+      );
+
+      if (window && !window.isDestroyed()) {
+        window.webContents.send('ai:turn-end', { provider: 'local' });
+      }
+
+      this.localHistory.push({ role: 'assistant', content: result });
+      this.turnCount++;
+      return result;
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+
+      if (window && !window.isDestroyed()) {
+        window.webContents.send('ai:output', {
+          provider: 'local',
+          type: 'error',
+          content: errorMsg,
+        });
+        window.webContents.send('ai:turn-end', { provider: 'local' });
+      }
+
+      this.localHistory.pop();
+      throw new Error(`Local LLM error: ${errorMsg}`);
+    }
+  }
+
+  /**
+   * Send a message via CLI subprocess (Copilot or Claude).
+   */
+  private async sendCLIMessage(
+    prompt: string,
+    provider: AIProvider,
+    window: BrowserWindow | null,
+    model?: string,
+  ): Promise<string> {
+    const adapter = this.getCLIAdapter(provider);
     const auth = await this.checkAuth(provider);
 
     if (!auth.installed) {
@@ -188,6 +306,11 @@ export class AIManager {
     });
   }
 
+  /** Get download status for all local chat models. */
+  getLocalModelStatuses() {
+    return this.local.getModelStatuses();
+  }
+
   /** Cancel the active process. */
   cancel(): void {
     if (this.activeProcess) {
@@ -196,10 +319,11 @@ export class AIManager {
     }
   }
 
-  /** Reset turn count (new conversation). */
+  /** Reset turn count and conversation history (new conversation). */
   resetSession(): void {
     this.cancel();
     this.turnCount = 0;
+    this.localHistory = [];
   }
 }
 

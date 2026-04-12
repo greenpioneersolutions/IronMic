@@ -12,7 +12,11 @@ echo ""
 # Step 1: Build Rust native addon
 echo "[1/4] Building Rust native addon..."
 cd "$ROOT/rust-core"
-cargo build --release --features metal,tts 2>&1 | tail -5
+cargo build --release --features napi-export,metal,tts 2>&1 | tail -5
+
+# Build LLM binary separately (avoids ggml symbol collision with whisper)
+echo "  Building LLM binary..."
+cargo build --release --bin ironmic-llm --features llm-bin 2>&1 | tail -3
 
 # Copy the dylib as a .node file
 if [ "$(uname -s)" = "Darwin" ]; then

@@ -10,7 +10,13 @@ echo "Platform: $(uname -s) $(uname -m)"
 echo ""
 
 # Build the native addon in release mode
-cargo build --release
+# Build the N-API addon (whisper + TTS, no LLM to avoid ggml collision)
+cargo build --release --features napi-export,metal,tts
+
+# Build the standalone LLM binary (separate process)
+echo ""
+echo "Building LLM binary..."
+cargo build --release --bin ironmic-llm --features llm-bin
 
 echo ""
 echo "Build complete."

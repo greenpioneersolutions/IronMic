@@ -36,7 +36,7 @@ declare global {
       getPipelineState: () => Promise<string>;
       resetPipelineState: () => Promise<void>;
       getModelStatus: () => Promise<any>;
-      downloadModel: (model: 'whisper' | 'llm' | 'tts') => Promise<void>;
+      downloadModel: (model: string) => Promise<void>;
       getAvailableWhisperModels: () => Promise<any[]>;
       getCurrentWhisperModel: () => Promise<string>;
       setWhisperModel: (modelId: string) => Promise<void>;
@@ -60,11 +60,12 @@ declare global {
       // AI Chat
       aiGetAuthState: () => Promise<any>;
       aiRefreshAuth: (provider?: string) => Promise<any>;
-      aiPickProvider: () => Promise<string | null>;
+      aiPickProvider: () => Promise<'copilot' | 'claude' | 'local' | null>;
       aiSendMessage: (prompt: string, provider: string, model?: string) => Promise<string>;
       aiGetModels: (provider?: string) => Promise<any[]>;
       aiCancel: () => Promise<void>;
       aiResetSession: () => Promise<void>;
+      aiGetLocalModelStatus: () => Promise<any[]>;
       onAiOutput: (callback: (data: any) => void) => () => void;
       onAiTurnStart: (callback: (data: any) => void) => () => void;
       onAiTurnEnd: (callback: (data: any) => void) => () => void;

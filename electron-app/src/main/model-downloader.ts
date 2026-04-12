@@ -39,7 +39,7 @@ function resolveModelsDir(): string {
 const MODELS_DIR = resolveModelsDir();
 
 /** Allowed domains for model downloads and redirects */
-const ALLOWED_DOMAINS = ['github.com', 'objects.githubusercontent.com', 'huggingface.co'];
+const ALLOWED_DOMAINS = ['github.com', 'objects.githubusercontent.com', 'huggingface.co', 'xethub.hf.co'];
 
 /** Overall download timeout: 10 minutes */
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;

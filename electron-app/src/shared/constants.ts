@@ -55,6 +55,21 @@ export const IPC_CHANNELS = {
   DOWNLOAD_MODEL: 'ironmic:download-model',
   GET_DOWNLOAD_PROGRESS: 'ironmic:get-download-progress',
 
+  // Analytics
+  ANALYTICS_RECOMPUTE_TODAY: 'ironmic:analytics-recompute-today',
+  ANALYTICS_BACKFILL: 'ironmic:analytics-backfill',
+  ANALYTICS_GET_OVERVIEW: 'ironmic:analytics-get-overview',
+  ANALYTICS_GET_DAILY_TREND: 'ironmic:analytics-get-daily-trend',
+  ANALYTICS_GET_TOP_WORDS: 'ironmic:analytics-get-top-words',
+  ANALYTICS_GET_SOURCE_BREAKDOWN: 'ironmic:analytics-get-source-breakdown',
+  ANALYTICS_GET_VOCABULARY_RICHNESS: 'ironmic:analytics-get-vocabulary-richness',
+  ANALYTICS_GET_STREAKS: 'ironmic:analytics-get-streaks',
+  ANALYTICS_GET_PRODUCTIVITY_COMPARISON: 'ironmic:analytics-get-productivity-comparison',
+  ANALYTICS_GET_TOPIC_BREAKDOWN: 'ironmic:analytics-get-topic-breakdown',
+  ANALYTICS_GET_TOPIC_TRENDS: 'ironmic:analytics-get-topic-trends',
+  ANALYTICS_CLASSIFY_TOPICS_BATCH: 'ironmic:analytics-classify-topics-batch',
+  ANALYTICS_GET_UNCLASSIFIED_COUNT: 'ironmic:analytics-get-unclassified-count',
+
   // Events (main → renderer)
   PIPELINE_STATE_CHANGED: 'ironmic:pipeline-state-changed',
   RECORDING_COMPLETE: 'ironmic:recording-complete',
@@ -73,6 +88,8 @@ export const MODEL_URLS: Record<string, string> = {
   'whisper-small': `${MODELS_BASE_URL}/ggml-small.bin`,
   'whisper-base': `${MODELS_BASE_URL}/ggml-base.bin`,
   llm: `${MODELS_BASE_URL}/mistral-7b-instruct-q4_k_m.gguf`,
+  'llm-chat-llama3': `${MODELS_BASE_URL}/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf`,
+  'llm-chat-phi3': `${MODELS_BASE_URL}/Phi-3-mini-4k-instruct-Q4_K_M.gguf`,
   'tts-model': `${MODELS_BASE_URL}/kokoro-v1.0-fp16.onnx`,
 };
 
@@ -83,6 +100,8 @@ export const MODEL_FALLBACK_URLS: Record<string, string> = {
   'whisper-small': 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
   'whisper-base': 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
   llm: 'https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf',
+  'llm-chat-llama3': 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+  'llm-chat-phi3': 'https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf',
   'tts-model': 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_fp16.onnx',
 };
 
@@ -92,6 +111,8 @@ export const MODEL_FILES: Record<string, string> = {
   'whisper-small': 'ggml-small.bin',
   'whisper-base': 'ggml-base.bin',
   llm: 'mistral-7b-instruct-q4_k_m.gguf',
+  'llm-chat-llama3': 'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+  'llm-chat-phi3': 'Phi-3-mini-4k-instruct-q4.gguf',
   'tts-model': 'kokoro-v1.0-fp16.onnx',
 };
 
@@ -103,6 +124,8 @@ export const MODEL_CHECKSUMS: Record<string, string> = {
   'whisper-small': '',
   'whisper-base': '',
   llm: '3e0039fd0273fcbebb49228943b17831aadd55cbcbf56f0af00499be2040ccf9',
+  'llm-chat-llama3': '', // Will be populated when model is uploaded to GitHub Releases
+  'llm-chat-phi3': '', // Will be populated when model is uploaded to GitHub Releases
   'tts-model': 'ba4527a874b42b21e35f468c10d326fdff3c7fc8cac1f85e9eb6c0dfc35c334a',
 };
 
@@ -113,7 +136,58 @@ export const MODEL_PARTS: Record<string, string[]> = {
     'mistral-7b-instruct-q4_k_m.gguf.part1',
     'mistral-7b-instruct-q4_k_m.gguf.part2',
   ],
+  'llm-chat-llama3': [
+    'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf.part0',
+    'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf.part1',
+    'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf.part2',
+  ],
 };
+
+// ── Chat LLM model registry for AI Assist ──
+
+export interface ChatLlmModelMeta {
+  /** Key used in MODEL_FILES / MODEL_URLS for download. */
+  id: string;
+  label: string;
+  sizeLabel: string;
+  /** Instruct-template type passed to Rust: "mistral" | "llama3" | "phi3" */
+  modelType: string;
+  /** If true, this model shares the file with the text-polish "llm" model. */
+  reusesPolishModel: boolean;
+  description: string;
+  /** Whether this model is compatible with the current llama.cpp version. */
+  compatible: boolean;
+}
+
+export const CHAT_LLM_MODELS: ChatLlmModelMeta[] = [
+  {
+    id: 'llm',
+    label: 'Mistral 7B Instruct',
+    sizeLabel: '~4.4 GB',
+    modelType: 'mistral',
+    reusesPolishModel: true,
+    description: 'Shared with text cleanup — no extra download needed',
+    compatible: true,
+  },
+  {
+    id: 'llm-chat-llama3',
+    label: 'Llama 3.1 8B Instruct',
+    sizeLabel: '~4.7 GB',
+    modelType: 'llama3',
+    reusesPolishModel: false,
+    description: 'Strong instruction following, multilingual',
+    compatible: true,
+  },
+  {
+    id: 'llm-chat-phi3',
+    label: 'Phi-3 Mini 3.8B',
+    sizeLabel: '~2.2 GB',
+    modelType: 'phi3',
+    reusesPolishModel: false,
+    description: 'Smallest and fastest option',
+    compatible: true,
+  },
+];
 
 /** TTS voices bundled in the installer — no download needed */
 export const TTS_VOICE_IDS = [

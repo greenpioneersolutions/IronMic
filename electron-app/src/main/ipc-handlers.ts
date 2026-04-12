@@ -8,6 +8,8 @@ import { IPC_CHANNELS, MODEL_FILES } from '../shared/constants';
 import { native } from './native-bridge';
 import { downloadModel, downloadTtsModel, getModelsStatus, isTtsModelReady } from './model-downloader';
 import { aiManager } from './ai/AIManager';
+import { getChatModelPath } from './ai/LocalLLMAdapter';
+import { llmSubprocess } from './ai/LlmSubprocess';
 import type { AIProvider } from './ai/types';
 
 // ── Input validation helpers ──
@@ -15,17 +17,18 @@ import type { AIProvider } from './ai/types';
 const MAX_PROMPT_LENGTH = 100_000;
 const MAX_SETTING_VALUE_LENGTH = 1_000;
 const MAX_AUDIO_BUFFER_SIZE = 100 * 1024 * 1024; // 100 MB
-const VALID_PROVIDERS: AIProvider[] = ['copilot', 'claude'];
+const VALID_PROVIDERS: AIProvider[] = ['copilot', 'claude', 'local'];
 
 const ALLOWED_SETTING_KEYS = new Set([
   'hotkey_record', 'llm_cleanup_enabled', 'default_view', 'theme',
   'whisper_model', 'llm_model', 'ai_enabled',
-  'ai_provider', 'ai_model',
+  'ai_provider', 'ai_model', 'ai_local_model',
   'tts_auto_readback', 'tts_voice', 'tts_speed', 'tts_enabled',
   'auto_delete_enabled', 'auto_delete_days',
   'security_clipboard_auto_clear', 'security_session_timeout',
   'security_clear_on_exit', 'security_ai_data_confirm', 'security_privacy_mode',
   'migration_tag_ai_done',
+  'analytics_backfill_done',
 ]);
 
 function assertString(val: unknown, name: string): asserts val is string {
@@ -139,6 +142,111 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('ironmic:is-gpu-enabled', () => native.addon.isGpuEnabled());
   ipcMain.handle('ironmic:set-gpu-enabled', (_e, enabled: boolean) => native.addon.setGpuEnabled(enabled));
 
+  // ── Analytics ──
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_RECOMPUTE_TODAY, () => native.addon.analyticsRecomputeToday());
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_BACKFILL, () => native.addon.analyticsBackfill());
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_OVERVIEW, (_e, period: string) => {
+    assertString(period, 'period');
+    return native.addon.analyticsGetOverview(period);
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_DAILY_TREND, (_e, from: string, to: string) => {
+    assertString(from, 'from');
+    assertString(to, 'to');
+    return native.addon.analyticsGetDailyTrend(from, to);
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_TOP_WORDS, (_e, from: string, to: string, limit: number) => {
+    assertString(from, 'from');
+    assertString(to, 'to');
+    return native.addon.analyticsGetTopWords(from, to, limit);
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_SOURCE_BREAKDOWN, (_e, from: string, to: string) => {
+    assertString(from, 'from');
+    assertString(to, 'to');
+    return native.addon.analyticsGetSourceBreakdown(from, to);
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_VOCABULARY_RICHNESS, (_e, from: string, to: string) => {
+    assertString(from, 'from');
+    assertString(to, 'to');
+    return native.addon.analyticsGetVocabularyRichness(from, to);
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_STREAKS, () => native.addon.analyticsGetStreaks());
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_PRODUCTIVITY_COMPARISON, () => native.addon.analyticsGetProductivityComparison());
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_TOPIC_BREAKDOWN, (_e, from: string, to: string) => {
+    assertString(from, 'from');
+    assertString(to, 'to');
+    return native.addon.analyticsGetTopicBreakdown(from, to);
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_TOPIC_TRENDS, (_e, from: string, to: string) => {
+    assertString(from, 'from');
+    assertString(to, 'to');
+    return native.addon.analyticsGetTopicTrends(from, to);
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_CLASSIFY_TOPICS_BATCH, async (_e, batchSize: number) => {
+    if (!llmSubprocess.isAvailable()) {
+      throw new Error('LLM subprocess not available');
+    }
+
+    // Get unclassified entries (id + text pairs) from Rust
+    const entriesJson: string = native.addon.analyticsGetUnclassifiedEntries(batchSize);
+    const entries: Array<[string, string]> = JSON.parse(entriesJson);
+    if (entries.length === 0) return 0;
+
+    const modelPath = getChatModelPath('llm');
+    const TOPIC_PROMPT = `You are a topic classifier. Given a transcription, output 1 to 3 topic categories that best describe the content.
+
+Choose from broad, reusable categories such as:
+- Software Development
+- Meeting Notes
+- Personal Thoughts
+- Email Draft
+- Creative Writing
+- Project Planning
+- Technical Discussion
+- Documentation
+- Code Review
+- Business Strategy
+- Data Analysis
+- Design
+- Customer Support
+- General
+
+Output ONLY a JSON array of strings, nothing else.
+Example output: ["Software Development", "Code Review"]
+If the text is too short or unclear, output: ["General"]`;
+
+    let classified = 0;
+    for (const [entryId, text] of entries) {
+      try {
+        // Truncate to ~500 words
+        const truncated = text.split(/\s+/).slice(0, 500).join(' ');
+        const response = await llmSubprocess.chatComplete({
+          modelPath,
+          modelType: 'mistral',
+          messages: [
+            { role: 'user', content: `${TOPIC_PROMPT}\n\nTranscription:\n${truncated}` },
+          ],
+          maxTokens: 128,
+          temperature: 0.1,
+        });
+
+        // Parse topics from LLM response
+        const topics = parseTopicResponse(response);
+        const topicsJson = JSON.stringify(topics);
+        native.addon.analyticsSaveEntryTopics(entryId, topicsJson);
+        classified++;
+      } catch (err) {
+        console.warn(`[analytics] Failed to classify entry ${entryId}:`, err);
+        // Save as General on failure so we don't retry forever
+        native.addon.analyticsSaveEntryTopics(entryId, JSON.stringify([["General", 0.5]]));
+        classified++;
+      }
+    }
+    return classified;
+  });
+  ipcMain.handle(IPC_CHANNELS.ANALYTICS_GET_UNCLASSIFIED_COUNT, () =>
+    native.addon.analyticsGetUnclassifiedCount()
+  );
+
   // ── TTS ──
   ipcMain.handle('ironmic:synthesize-text', (_e, text: string) => native.addon.synthesizeText(text));
   ipcMain.handle('ironmic:tts-play', () => native.addon.ttsPlay());
@@ -177,6 +285,24 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle('ai:cancel', () => aiManager.cancel());
   ipcMain.handle('ai:reset-session', () => aiManager.resetSession());
+  ipcMain.handle('ai:local-model-status', () => aiManager.getLocalModelStatuses());
 
   console.log('[ipc-handlers] All IPC handlers registered');
+}
+
+/** Parse LLM topic classification response into [topic, confidence] pairs. */
+function parseTopicResponse(response: string): Array<[string, number]> {
+  const trimmed = response.trim();
+
+  // Find JSON array in response
+  const start = trimmed.indexOf('[');
+  const end = trimmed.lastIndexOf(']');
+  if (start !== -1 && end !== -1 && end > start) {
+    try {
+      const topics: string[] = JSON.parse(trimmed.slice(start, end + 1));
+      return topics.filter((t) => typeof t === 'string' && t.length > 0).map((t) => [t, 1.0]);
+    } catch { /* fall through */ }
+  }
+
+  return [['General', 1.0]];
 }

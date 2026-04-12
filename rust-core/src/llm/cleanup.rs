@@ -4,16 +4,15 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 use crate::error::IronMicError;
-#[cfg(feature = "llm")]
+use crate::llm::chat::{ChatMessage, ChatModel};
+#[cfg(any(feature = "llm", feature = "llm-bin"))]
 use crate::llm::prompts;
 
 /// Default model filename.
 const DEFAULT_MODEL_FILENAME: &str = "mistral-7b-instruct-q4_k_m.gguf";
 
 /// Resolve the default model path.
-/// In production the Electron host sets IRONMIC_MODELS_DIR to the app's
-/// Resources/models path.  Falls back to the compile-time manifest dir for dev.
-fn default_model_path() -> std::path::PathBuf {
+pub fn default_model_path() -> std::path::PathBuf {
     let base = if let Ok(dir) = std::env::var("IRONMIC_MODELS_DIR") {
         std::path::PathBuf::from(dir)
     } else {
@@ -26,15 +25,10 @@ fn default_model_path() -> std::path::PathBuf {
 /// Configuration for the LLM cleanup engine.
 #[derive(Clone, Debug)]
 pub struct LlmConfig {
-    /// Path to the GGUF model file.
     pub model_path: PathBuf,
-    /// Maximum number of tokens to generate.
     pub max_tokens: u32,
-    /// Temperature for sampling (lower = more deterministic).
     pub temperature: f32,
-    /// Number of threads for inference.
     pub n_threads: u32,
-    /// Number of GPU layers to offload (0 = CPU only).
     pub n_gpu_layers: u32,
 }
 
@@ -56,80 +50,79 @@ fn num_cpus() -> u32 {
         .unwrap_or(4)
 }
 
-/// The LLM cleanup engine for polishing raw transcripts.
-///
-/// When compiled with the `llm` feature, this wraps llama-cpp-rs for real inference.
-/// Without the feature, it provides a stub that passes through the raw text.
+/// Global shared backend — llama-cpp-2 only allows one init per process.
+#[cfg(any(feature = "llm", feature = "llm-bin"))]
+static LLAMA_BACKEND: std::sync::LazyLock<
+    Result<llama_cpp_2::llama_backend::LlamaBackend, String>,
+> = std::sync::LazyLock::new(|| {
+    llama_cpp_2::llama_backend::LlamaBackend::init()
+        .map_err(|e| format!("{e}"))
+});
+
+#[cfg(any(feature = "llm", feature = "llm-bin"))]
+fn get_backend() -> Result<&'static llama_cpp_2::llama_backend::LlamaBackend, IronMicError> {
+    LLAMA_BACKEND
+        .as_ref()
+        .map_err(|e| IronMicError::Llm(format!("Failed to init llama backend: {e}")))
+}
+
+/// The LLM engine for polishing and chat.
 pub struct LlmEngine {
     config: LlmConfig,
-    #[cfg(feature = "llm")]
-    model: Option<llama_cpp_rs::LlamaModel>,
-    #[cfg(not(feature = "llm"))]
+    #[cfg(any(feature = "llm", feature = "llm-bin"))]
+    loaded: Option<llama_cpp_2::model::LlamaModel>,
+    #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
     _loaded: bool,
 }
 
 unsafe impl Send for LlmEngine {}
 
 impl LlmEngine {
-    /// Create a new LlmEngine with the given configuration.
     pub fn new(config: LlmConfig) -> Self {
         Self {
             config,
-            #[cfg(feature = "llm")]
-            model: None,
-            #[cfg(not(feature = "llm"))]
+            #[cfg(any(feature = "llm", feature = "llm-bin"))]
+            loaded: None,
+            #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
             _loaded: false,
         }
     }
 
-    /// Create an LlmEngine with default configuration.
     pub fn with_defaults() -> Self {
         Self::new(LlmConfig::default())
     }
 
-    /// Check if the model file exists at the configured path.
     pub fn model_exists(&self) -> bool {
         self.config.model_path.exists()
     }
 
-    /// Get the configured model path.
     pub fn model_path(&self) -> &Path {
         &self.config.model_path
     }
 
-    /// Check if the model is loaded and ready for inference.
     pub fn is_loaded(&self) -> bool {
-        #[cfg(feature = "llm")]
-        {
-            self.model.is_some()
-        }
-        #[cfg(not(feature = "llm"))]
-        {
-            self._loaded
-        }
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
+        { self.loaded.is_some() }
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
+        { self._loaded }
     }
 
-    /// Load the LLM model from disk.
     pub fn load_model(&mut self) -> Result<(), IronMicError> {
         let model_path = &self.config.model_path;
 
         if !model_path.exists() {
-            warn!(
-                path = %model_path.display(),
-                "LLM model file not found. Production builds must bundle the model."
-            );
+            warn!(path = %model_path.display(), "LLM model file not found");
 
-            #[cfg(feature = "llm")]
+            #[cfg(any(feature = "llm", feature = "llm-bin"))]
             {
                 return Err(IronMicError::Llm(format!(
-                    "Model file not found: {}. Download it to this path for development.",
+                    "Model file not found: {}",
                     model_path.display()
                 )));
             }
 
-            #[cfg(not(feature = "llm"))]
+            #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
             {
-                warn!("LLM feature not enabled — using stub polish (passthrough)");
                 self._loaded = true;
                 return Ok(());
             }
@@ -137,25 +130,27 @@ impl LlmEngine {
 
         info!(path = %model_path.display(), "Loading LLM model");
 
-        #[cfg(feature = "llm")]
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
         {
-            use llama_cpp_rs::{LlamaModel, LlamaParams};
-            let mut params = LlamaParams::default();
-            params.n_gpu_layers = self.config.n_gpu_layers as i32;
+            use llama_cpp_2::model::params::LlamaModelParams;
 
-            let model = LlamaModel::load_from_file(
-                model_path.to_str().ok_or_else(|| {
-                    IronMicError::Llm("Invalid model path encoding".into())
-                })?,
-                params,
+            let backend = get_backend()?;
+
+            let mut model_params = LlamaModelParams::default();
+            model_params = model_params.with_n_gpu_layers(self.config.n_gpu_layers);
+
+            let model = llama_cpp_2::model::LlamaModel::load_from_file(
+                backend,
+                model_path,
+                &model_params,
             )
             .map_err(|e| IronMicError::Llm(format!("Failed to load LLM model: {e}")))?;
 
-            self.model = Some(model);
+            self.loaded = Some(model);
             info!("LLM model loaded successfully");
         }
 
-        #[cfg(not(feature = "llm"))]
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
         {
             warn!("LLM feature not enabled — model loading is a no-op");
             self._loaded = true;
@@ -164,93 +159,234 @@ impl LlmEngine {
         Ok(())
     }
 
-    /// Polish raw transcript text using the local LLM.
-    ///
-    /// Returns the cleaned-up version of the text.
+    pub fn load_model_from_path(&mut self, path: &Path) -> Result<(), IronMicError> {
+        self.unload_model();
+        self.config.model_path = path.to_path_buf();
+        self.load_model()
+    }
+
+    pub fn unload_model(&mut self) {
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
+        {
+            if self.loaded.is_some() {
+                info!("Unloading LLM model");
+                self.loaded = None;
+            }
+        }
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
+        { self._loaded = false; }
+    }
+
+    /// Run inference on a prompt string and return the generated text.
+    #[cfg(any(feature = "llm", feature = "llm-bin"))]
+    pub fn generate(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        temperature: f32,
+        on_token: Option<&dyn Fn(&str)>,
+    ) -> Result<String, IronMicError> {
+        use std::num::NonZeroU32;
+        use llama_cpp_2::context::params::LlamaContextParams;
+        use llama_cpp_2::llama_batch::LlamaBatch;
+        use llama_cpp_2::sampling::LlamaSampler;
+        use llama_cpp_2::model::AddBos;
+
+        let loaded = self.loaded.as_ref().ok_or_else(|| {
+            IronMicError::Llm("LLM model not loaded. Call load_model() first.".into())
+        })?;
+
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(4096))
+            .with_n_threads(self.config.n_threads as i32)
+            .with_n_threads_batch(self.config.n_threads as i32);
+
+        let backend = get_backend()?;
+        let mut ctx = loaded.new_context(backend, ctx_params)
+            .map_err(|e| IronMicError::Llm(format!("Failed to create context: {e}")))?;
+
+        // Tokenize the prompt
+        let tokens = loaded.str_to_token(prompt, AddBos::Always)
+            .map_err(|e| IronMicError::Llm(format!("Tokenization failed: {e}")))?;
+
+        let n_tokens = tokens.len();
+        if n_tokens == 0 {
+            return Ok(String::new());
+        }
+
+        // Create batch and add prompt tokens
+        let mut batch = LlamaBatch::new(ctx.n_batch() as usize, 1);
+        let last_idx = (n_tokens - 1) as i32;
+
+        for (i, &token) in tokens.iter().enumerate() {
+            let is_last = i as i32 == last_idx;
+            batch.add(token, i as i32, &[0], is_last)
+                .map_err(|e| IronMicError::Llm(format!("Batch add failed: {e}")))?;
+        }
+
+        // Decode the prompt
+        ctx.decode(&mut batch)
+            .map_err(|e| IronMicError::Llm(format!("Prompt decode failed: {e}")))?;
+
+        // Set up sampler with temperature
+        let sampler = LlamaSampler::chain_simple([
+            LlamaSampler::temp(temperature),
+            LlamaSampler::dist(1234),
+        ]);
+        let mut sampler = sampler;
+
+        // Generate tokens
+        let mut output = String::new();
+        let mut n_cur = n_tokens as i32;
+
+        for _ in 0..max_tokens {
+            let new_token = sampler.sample(&ctx, -1);
+
+            // Check for end of generation
+            if loaded.is_eog_token(new_token) {
+                break;
+            }
+
+            let piece_bytes = loaded.token_to_piece_bytes(new_token, 128, true, None)
+                .map_err(|e| IronMicError::Llm(format!("Token to bytes failed: {e}")))?;
+            let piece = String::from_utf8_lossy(&piece_bytes).to_string();
+
+            if let Some(cb) = on_token {
+                cb(&piece);
+            }
+            output.push_str(&piece);
+
+            // Prepare next batch
+            batch.clear();
+            batch.add(new_token, n_cur, &[0], true)
+                .map_err(|e| IronMicError::Llm(format!("Batch add failed: {e}")))?;
+            n_cur += 1;
+
+            ctx.decode(&mut batch)
+                .map_err(|e| IronMicError::Llm(format!("Decode failed: {e}")))?;
+        }
+
+        Ok(output.trim().to_string())
+    }
+
+    /// Build a chat prompt using the model's built-in template, or fall back to manual formatting.
+    #[cfg(any(feature = "llm", feature = "llm-bin"))]
+    pub fn build_chat_prompt(&self, messages: &[ChatMessage], model_type: &ChatModel) -> Result<String, IronMicError> {
+        use llama_cpp_2::model::LlamaChatMessage;
+        use crate::llm::chat::format_chat_prompt;
+
+        let loaded = self.loaded.as_ref().ok_or_else(|| {
+            IronMicError::Llm("LLM model not loaded".into())
+        })?;
+
+        // Try the model's built-in chat template first
+        if let Ok(template) = loaded.chat_template(None) {
+            let chat_messages: Vec<LlamaChatMessage> = messages
+                .iter()
+                .filter_map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()).ok())
+                .collect();
+
+            if let Ok(prompt) = loaded.apply_chat_template(&template, &chat_messages, true) {
+                return Ok(prompt);
+            }
+        }
+
+        // Fall back to manual template formatting
+        Ok(format_chat_prompt(model_type, messages))
+    }
+
+    // ── Public API ──
+
+    pub fn chat_complete(
+        &self,
+        messages: &[ChatMessage],
+        model_type: &ChatModel,
+        max_tokens: u32,
+    ) -> Result<String, IronMicError> {
+        if messages.is_empty() {
+            return Ok(String::new());
+        }
+
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
+        {
+            let prompt = self.build_chat_prompt(messages, model_type)?;
+            info!(messages_count = messages.len(), prompt_chars = prompt.len(), "Starting LLM chat completion");
+            let result = self.generate(&prompt, max_tokens, 0.3, None)?;
+            info!(output_chars = result.len(), "LLM chat completion finished");
+            Ok(result)
+        }
+
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
+        {
+            let _ = (model_type, max_tokens);
+            self.chat_stub(messages)
+        }
+    }
+
+    pub fn chat_complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        model_type: &ChatModel,
+        max_tokens: u32,
+        on_token: Box<dyn Fn(String) -> bool + Send + 'static>,
+    ) -> Result<String, IronMicError> {
+        if messages.is_empty() {
+            return Ok(String::new());
+        }
+
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
+        {
+            let prompt = self.build_chat_prompt(messages, model_type)?;
+            info!(messages_count = messages.len(), prompt_chars = prompt.len(), "Starting LLM streaming chat");
+            let callback = move |text: &str| { on_token(text.to_string()); };
+            let result = self.generate(&prompt, max_tokens, 0.3, Some(&callback))?;
+            info!(output_chars = result.len(), "LLM streaming chat finished");
+            Ok(result)
+        }
+
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
+        {
+            let _ = (model_type, max_tokens, on_token);
+            self.chat_stub(messages)
+        }
+    }
+
     pub fn polish_text(&self, raw_transcript: &str) -> Result<String, IronMicError> {
         if raw_transcript.trim().is_empty() {
             return Ok(String::new());
         }
 
-        #[cfg(feature = "llm")]
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
         {
-            self.polish_with_llm(raw_transcript)
+            let prompt = prompts::build_cleanup_prompt(raw_transcript);
+            info!(input_chars = raw_transcript.len(), "Starting LLM text cleanup");
+            let result = self.generate(&prompt, self.config.max_tokens, self.config.temperature, None)?;
+            info!(input_chars = raw_transcript.len(), output_chars = result.len(), "LLM text cleanup complete");
+            Ok(result)
         }
 
-        #[cfg(not(feature = "llm"))]
-        {
-            self.polish_stub(raw_transcript)
-        }
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
+        { self.polish_stub(raw_transcript) }
     }
 
-    /// Real LLM polishing via llama-cpp-rs.
-    #[cfg(feature = "llm")]
-    fn polish_with_llm(&self, raw_transcript: &str) -> Result<String, IronMicError> {
-        use llama_cpp_rs::SessionParams;
-
-        let model = self.model.as_ref().ok_or_else(|| {
-            IronMicError::Llm("LLM model not loaded. Call load_model() first.".into())
-        })?;
-
-        let prompt = prompts::build_cleanup_prompt(raw_transcript);
-
-        info!(
-            input_chars = raw_transcript.len(),
-            "Starting LLM text cleanup"
-        );
-
-        let mut session_params = SessionParams::default();
-        session_params.n_ctx = 4096;
-
-        let mut session = model
-            .create_session(session_params)
-            .map_err(|e| IronMicError::Llm(format!("Failed to create LLM session: {e}")))?;
-
-        session
-            .advance_context(&prompt)
-            .map_err(|e| IronMicError::Llm(format!("Failed to set context: {e}")))?;
-
-        let mut output = String::new();
-        let max_tokens = self.config.max_tokens as usize;
-
-        for _ in 0..max_tokens {
-            let token = session
-                .start_completing()
-                .map_err(|e| IronMicError::Llm(format!("Completion error: {e}")))?;
-
-            if let Some(text) = token {
-                output.push_str(&text);
-            } else {
-                break;
-            }
+    #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
+    #[allow(unused_variables)]
+    fn chat_stub(&self, messages: &[ChatMessage]) -> Result<String, IronMicError> {
+        if !self._loaded {
+            return Err(IronMicError::Llm("LLM model not loaded".into()));
         }
-
-        let polished = output.trim().to_string();
-        info!(
-            input_chars = raw_transcript.len(),
-            output_chars = polished.len(),
-            "LLM text cleanup complete"
-        );
-
-        Ok(polished)
+        let last_user = messages.iter().rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        Ok(format!("[LLM stub] Received: {}", last_user))
     }
 
-    /// Stub polishing when LLM feature is not enabled.
-    /// Returns the raw transcript as-is with a note.
-    #[cfg(not(feature = "llm"))]
+    #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
     fn polish_stub(&self, raw_transcript: &str) -> Result<String, IronMicError> {
         if !self._loaded {
-            return Err(IronMicError::Llm(
-                "LLM model not loaded. Call load_model() first.".into(),
-            ));
+            return Err(IronMicError::Llm("LLM model not loaded".into()));
         }
-
-        info!(
-            input_chars = raw_transcript.len(),
-            "Stub polish (llm feature not enabled)"
-        );
-
-        // In stub mode, return the raw text unchanged
         Ok(raw_transcript.to_string())
     }
 }
@@ -262,37 +398,56 @@ pub struct SharedLlmEngine {
 
 impl SharedLlmEngine {
     pub fn new(engine: LlmEngine) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(engine)),
-        }
+        Self { inner: Arc::new(Mutex::new(engine)) }
     }
 
     pub fn load_model(&self) -> Result<(), IronMicError> {
-        let mut engine = self.inner.lock().unwrap();
-        engine.load_model()
+        self.inner.lock().unwrap().load_model()
     }
 
     pub fn is_loaded(&self) -> bool {
-        let engine = self.inner.lock().unwrap();
-        engine.is_loaded()
+        self.inner.lock().unwrap().is_loaded()
     }
 
     pub fn polish_text(&self, raw_transcript: &str) -> Result<String, IronMicError> {
-        let engine = self.inner.lock().unwrap();
-        engine.polish_text(raw_transcript)
+        self.inner.lock().unwrap().polish_text(raw_transcript)
     }
 
     pub fn model_path(&self) -> PathBuf {
-        let engine = self.inner.lock().unwrap();
-        engine.model_path().to_path_buf()
+        self.inner.lock().unwrap().model_path().to_path_buf()
+    }
+
+    pub fn load_model_from_path(&self, path: &Path) -> Result<(), IronMicError> {
+        self.inner.lock().unwrap().load_model_from_path(path)
+    }
+
+    pub fn unload_model(&self) {
+        self.inner.lock().unwrap().unload_model();
+    }
+
+    pub fn chat_complete(
+        &self,
+        messages: &[ChatMessage],
+        model_type: &ChatModel,
+        max_tokens: u32,
+    ) -> Result<String, IronMicError> {
+        self.inner.lock().unwrap().chat_complete(messages, model_type, max_tokens)
+    }
+
+    pub fn chat_complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        model_type: &ChatModel,
+        max_tokens: u32,
+        on_token: Box<dyn Fn(String) -> bool + Send + 'static>,
+    ) -> Result<String, IronMicError> {
+        self.inner.lock().unwrap().chat_complete_streaming(messages, model_type, max_tokens, on_token)
     }
 }
 
 impl Clone for SharedLlmEngine {
     fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
+        Self { inner: Arc::clone(&self.inner) }
     }
 }
 
@@ -322,9 +477,9 @@ mod tests {
             ..Default::default()
         });
         let result = engine.load_model();
-        #[cfg(feature = "llm")]
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
         assert!(result.is_err());
-        #[cfg(not(feature = "llm"))]
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
         assert!(result.is_ok());
     }
 
@@ -354,7 +509,7 @@ mod tests {
     #[test]
     fn engine_model_exists_with_bad_path() {
         let engine = LlmEngine::new(LlmConfig {
-            model_path: std::path::PathBuf::from("/nonexistent/model.gguf"),
+            model_path: PathBuf::from("/nonexistent/model.gguf"),
             ..Default::default()
         });
         assert!(!engine.model_exists());
@@ -389,9 +544,51 @@ mod tests {
         let engine = LlmEngine::with_defaults();
         let shared = SharedLlmEngine::new(engine);
         let result = shared.load_model();
-        #[cfg(feature = "llm")]
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
         assert!(result.is_err());
-        #[cfg(not(feature = "llm"))]
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn chat_complete_empty_messages() {
+        let engine = LlmEngine::with_defaults();
+        let result = engine.chat_complete(&[], &ChatModel::Mistral, 100);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_complete_without_loading_errors() {
+        let engine = LlmEngine::with_defaults();
+        let messages = vec![ChatMessage { role: "user".into(), content: "Hello".into() }];
+        let result = engine.chat_complete(&messages, &ChatModel::Mistral, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unload_model_resets_state() {
+        let mut engine = LlmEngine::with_defaults();
+        engine.unload_model();
+        assert!(!engine.is_loaded());
+    }
+
+    #[test]
+    fn load_model_from_bad_path_errors() {
+        let mut engine = LlmEngine::with_defaults();
+        let result = engine.load_model_from_path(Path::new("/nonexistent/model.gguf"));
+        #[cfg(any(feature = "llm", feature = "llm-bin"))]
+        assert!(result.is_err());
+        #[cfg(not(any(feature = "llm", feature = "llm-bin")))]
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn shared_engine_chat_complete() {
+        let engine = LlmEngine::with_defaults();
+        let shared = SharedLlmEngine::new(engine);
+        let result = shared.chat_complete(&[], &ChatModel::Llama3, 100);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }

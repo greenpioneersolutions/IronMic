@@ -22,6 +22,37 @@ pub fn build_cleanup_prompt(raw_transcript: &str) -> String {
     )
 }
 
+/// System prompt for topic classification.
+pub const TOPIC_CLASSIFICATION_PROMPT: &str = r#"You are a topic classifier. Given a transcription, output 1 to 3 topic categories that best describe the content.
+
+Choose from broad, reusable categories such as:
+- Software Development
+- Meeting Notes
+- Personal Thoughts
+- Email Draft
+- Creative Writing
+- Project Planning
+- Technical Discussion
+- Documentation
+- Code Review
+- Business Strategy
+- Data Analysis
+- Design
+- Customer Support
+- General
+
+Output ONLY a JSON array of strings, nothing else.
+Example output: ["Software Development", "Code Review"]
+If the text is too short or unclear, output: ["General"]"#;
+
+/// Build the full prompt for topic classification.
+pub fn build_topic_classification_prompt(text: &str) -> String {
+    format!(
+        "{}\n\nTranscription:\n{}",
+        TOPIC_CLASSIFICATION_PROMPT, text
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

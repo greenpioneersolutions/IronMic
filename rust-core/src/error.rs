@@ -36,6 +36,7 @@ pub enum IronMicError {
     Internal(#[from] anyhow::Error),
 }
 
+#[cfg(feature = "napi-export")]
 impl From<IronMicError> for napi::Error {
     fn from(e: IronMicError) -> Self {
         napi::Error::from_reason(e.to_string())
