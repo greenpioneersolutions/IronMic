@@ -9,7 +9,7 @@ import {
   Settings, Bot, Volume2, Monitor, Sun, Moon, Shield, Keyboard,
   Cpu, Database, BookOpen, Lock, ClipboardCheck, Eye, EyeOff,
   Clock, AlertTriangle, CheckCircle, Info, Wifi, WifiOff, FileWarning,
-  Trash2, HardDrive, Sparkles, RefreshCw,
+  Trash2, HardDrive, Sparkles, RefreshCw, Download,
 } from 'lucide-react';
 
 type SettingsTab = 'general' | 'speech' | 'ai' | 'models' | 'data' | 'security';
@@ -134,54 +134,103 @@ function AIAssistSettings() {
   const [models, setModels] = useState<AIModelOption[]>([]);
   const [authState, setAuthState] = useState<any>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [localModels, setLocalModels] = useState<any[]>([]);
+  const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   useEffect(() => {
     loadAiSettings();
+    const cleanup = window.ironmic.onModelDownloadProgress((prog: any) => {
+      if (prog.model?.startsWith('llm')) {
+        setDownloadProgress(prog.percent || 0);
+        if (prog.status === 'complete') {
+          setDownloadingModel(null);
+          // Refresh local model status
+          window.ironmic.aiGetLocalModelStatus?.().then((statuses: any[]) => {
+            if (statuses) setLocalModels(statuses);
+          }).catch(() => {});
+        }
+        if (prog.status === 'error') {
+          setDownloadingModel(null);
+        }
+      }
+    });
+    return cleanup;
   }, []);
 
   async function loadAiSettings() {
     const api = window.ironmic;
-    const [prov, mod, auth, allModels] = await Promise.all([
+    const [prov, mod, auth, allModels, localModelStatus] = await Promise.all([
       api.getSetting('ai_provider'),
       api.getSetting('ai_model'),
       api.aiGetAuthState(),
       api.aiGetModels(),
+      api.aiGetLocalModelStatus?.() || Promise.resolve([]),
     ]);
     if (prov) setProvider(prov);
     if (mod) setModel(mod);
     setAuthState(auth);
     setModels(allModels || []);
+    if (localModelStatus) setLocalModels(localModelStatus);
   }
 
   async function handleProviderChange(p: string) {
     setProvider(p);
     await window.ironmic.setSetting('ai_provider', p);
     // Set default model for new provider
-    const providerModels = models.filter((m) => m.provider === p);
-    const defaultModel = providerModels.find((m) => m.free) || providerModels[0];
-    if (defaultModel) {
-      setModel(defaultModel.id);
-      await window.ironmic.setSetting('ai_model', defaultModel.id);
+    if (p === 'local') {
+      // Pick first downloaded local model, or first available
+      const downloaded = localModels.find((m: any) => m.downloaded);
+      const defaultLocal = downloaded || localModels[0];
+      if (defaultLocal) {
+        setModel(defaultLocal.id);
+        await window.ironmic.setSetting('ai_model', defaultLocal.id);
+      }
+    } else {
+      const providerModels = models.filter((m) => m.provider === p);
+      const defaultModel = providerModels.find((m) => m.free) || providerModels[0];
+      if (defaultModel) {
+        setModel(defaultModel.id);
+        await window.ironmic.setSetting('ai_model', defaultModel.id);
+      }
     }
   }
 
   async function handleModelChange(m: string) {
     setModel(m);
     await window.ironmic.setSetting('ai_model', m);
+    if (provider === 'local') {
+      await window.ironmic.setSetting('ai_local_model', m);
+    }
   }
 
   async function handleRefreshAuth() {
     setRefreshing(true);
     try {
-      const auth = await window.ironmic.aiRefreshAuth();
+      const [auth, localModelStatus] = await Promise.all([
+        window.ironmic.aiRefreshAuth(),
+        window.ironmic.aiGetLocalModelStatus?.() || Promise.resolve([]),
+      ]);
       setAuthState(auth);
+      if (localModelStatus) setLocalModels(localModelStatus);
     } catch { /* ignore */ }
     setRefreshing(false);
+  }
+
+  async function handleDownloadLocalModel(modelId: string) {
+    setDownloadingModel(modelId);
+    setDownloadProgress(0);
+    try {
+      await window.ironmic.downloadModel(modelId);
+    } catch {
+      setDownloadingModel(null);
+    }
   }
 
   const providerModels = models.filter((m) => m.provider === provider);
   const claudeAuth = authState?.claude;
   const copilotAuth = authState?.copilot;
+  const localAuth = authState?.local;
 
   return (
     <>
@@ -190,7 +239,7 @@ function AIAssistSettings() {
       <SettingRow
         icon={Bot}
         title="Enable AI Assistant"
-        description="Chat with AI using your own CLI tools and credentials"
+        description="Chat with AI using CLI tools, API keys, or a local LLM"
         control={<Toggle checked={aiEnabled} onChange={setAiEnabled} />}
       />
 
@@ -199,19 +248,20 @@ function AIAssistSettings() {
           {/* Provider selection */}
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-iron-text">Provider</label>
-            <p className="text-xs text-iron-text-muted">Choose which CLI to use for AI chat</p>
-            <div className="flex gap-1.5 mt-2">
+            <p className="text-xs text-iron-text-muted">Choose how AI Assist runs</p>
+            <div className="grid grid-cols-3 gap-1.5 mt-2">
               {[
                 { value: 'copilot', label: 'GitHub Copilot', sub: 'Free tier available' },
                 { value: 'claude', label: 'Claude Code', sub: 'Anthropic API key' },
+                { value: 'local', label: 'Local LLM', sub: 'Free — on device' },
               ].map(({ value, label, sub }) => {
-                const auth = value === 'copilot' ? copilotAuth : claudeAuth;
+                const auth = value === 'copilot' ? copilotAuth : value === 'claude' ? claudeAuth : localAuth;
                 const isActive = provider === value;
                 return (
                   <button
                     key={value}
                     onClick={() => handleProviderChange(value)}
-                    className={`flex-1 text-left px-3 py-2.5 rounded-lg text-xs transition-all ${
+                    className={`text-left px-3 py-2.5 rounded-lg text-xs transition-all ${
                       isActive
                         ? 'bg-iron-accent/15 text-iron-accent-light border border-iron-accent/20'
                         : 'bg-iron-surface text-iron-text-muted border border-iron-border hover:border-iron-border-hover'
@@ -221,7 +271,9 @@ function AIAssistSettings() {
                     <span className="block text-[10px] mt-0.5 opacity-70">{sub}</span>
                     {auth && (
                       <span className={`block text-[10px] mt-1 ${auth.authenticated ? 'text-iron-success' : 'text-iron-warning'}`}>
-                        {auth.authenticated ? '● Connected' : auth.installed ? '○ Not logged in' : '○ Not installed'}
+                        {value === 'local'
+                          ? (auth.authenticated ? '● Model ready' : '○ Download a model')
+                          : (auth.authenticated ? '● Connected' : auth.installed ? '○ Not logged in' : '○ Not installed')}
                       </span>
                     )}
                   </button>
@@ -234,55 +286,145 @@ function AIAssistSettings() {
               className="flex items-center gap-1.5 text-[11px] text-iron-accent-light hover:underline mt-1"
             >
               <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
-              {refreshing ? 'Checking...' : 'Refresh auth status'}
+              {refreshing ? 'Checking...' : 'Refresh status'}
             </button>
           </div>
 
-          {/* Model selection */}
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-iron-text">Model</label>
-            <p className="text-xs text-iron-text-muted">
-              {provider === 'copilot'
-                ? 'Select which model GitHub Copilot should use'
-                : 'Select which Claude model to use'}
-            </p>
-            <div className="space-y-1 mt-2">
-              {providerModels.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => handleModelChange(m.id)}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg text-xs transition-all ${
-                    model === m.id
-                      ? 'bg-iron-accent/15 text-iron-accent-light border border-iron-accent/20'
-                      : 'bg-iron-surface text-iron-text-secondary border border-iron-border hover:border-iron-border-hover'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="font-medium">{m.label}</span>
-                      {m.free && (
-                        <span className="ml-1.5 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-iron-success/15 text-iron-success border border-iron-success/20">Free</span>
+          {/* Model selection — CLI providers */}
+          {provider !== 'local' && (
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-iron-text">Model</label>
+              <p className="text-xs text-iron-text-muted">
+                {provider === 'copilot'
+                  ? 'Select which model GitHub Copilot should use'
+                  : 'Select which Claude model to use'}
+              </p>
+              <div className="space-y-1 mt-2">
+                {providerModels.map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={() => handleModelChange(m.id)}
+                    className={`w-full text-left px-3 py-2.5 rounded-lg text-xs transition-all ${
+                      model === m.id
+                        ? 'bg-iron-accent/15 text-iron-accent-light border border-iron-accent/20'
+                        : 'bg-iron-surface text-iron-text-secondary border border-iron-border hover:border-iron-border-hover'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-medium">{m.label}</span>
+                        {m.free && (
+                          <span className="ml-1.5 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-iron-success/15 text-iron-success border border-iron-success/20">Free</span>
+                        )}
+                      </div>
+                      {model === m.id && <CheckCircle className="w-3.5 h-3.5 text-iron-accent-light" />}
+                    </div>
+                    <span className="block text-[10px] text-iron-text-muted mt-0.5">{m.description}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Model selection — Local LLM with download */}
+          {provider === 'local' && (
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-iron-text">Local Model</label>
+              <p className="text-xs text-iron-text-muted">
+                Download and select a local LLM. Models run entirely on your device.
+              </p>
+              <div className="space-y-1.5 mt-2">
+                {localModels.map((m: any) => {
+                  const isSelected = model === m.id;
+                  const isDownloading = downloadingModel === m.id;
+                  const isCompatible = m.compatible !== false;
+                  return (
+                    <div
+                      key={m.id}
+                      className={`w-full text-left px-3 py-3 rounded-lg text-xs transition-all ${
+                        !isCompatible
+                          ? 'bg-iron-surface text-iron-text-muted border border-iron-border opacity-60'
+                          : isSelected && m.downloaded
+                          ? 'bg-iron-accent/15 text-iron-accent-light border border-iron-accent/20'
+                          : 'bg-iron-surface text-iron-text-secondary border border-iron-border'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-medium">{m.label}</span>
+                            <span className="text-[10px] text-iron-text-muted">{m.sizeLabel}</span>
+                            {isCompatible ? (
+                              <span className="ml-1 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-iron-success/15 text-iron-success border border-iron-success/20">Free</span>
+                            ) : (
+                              <span className="ml-1 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-iron-text-muted/15 text-iron-text-muted border border-iron-text-muted/20">Soon</span>
+                            )}
+                          </div>
+                          <span className="block text-[10px] text-iron-text-muted mt-0.5">{m.description}</span>
+                        </div>
+                        <div className="flex-shrink-0 ml-2">
+                          {!isCompatible ? (
+                            <span className="text-[10px] text-iron-text-muted">Unavailable</span>
+                          ) : m.downloaded ? (
+                            isSelected ? (
+                              <CheckCircle className="w-4 h-4 text-iron-accent-light" />
+                            ) : (
+                              <button
+                                onClick={() => handleModelChange(m.id)}
+                                className="px-2.5 py-1 text-[10px] font-medium rounded-md bg-iron-surface-hover text-iron-text-secondary hover:text-iron-text border border-iron-border"
+                              >
+                                Select
+                              </button>
+                            )
+                          ) : isDownloading ? (
+                            <span className="text-[10px] text-iron-text-muted">{downloadProgress}%</span>
+                          ) : (
+                            <button
+                              onClick={() => handleDownloadLocalModel(m.id)}
+                              className="flex items-center gap-1 px-2.5 py-1 text-[10px] font-medium rounded-md bg-gradient-accent text-white hover:shadow-glow transition-all"
+                            >
+                              <Download className="w-3 h-3" />
+                              Download
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {isDownloading && (
+                        <div className="mt-2 w-full h-1 bg-iron-surface-active rounded-full overflow-hidden">
+                          <div className="h-full bg-gradient-accent rounded-full transition-all duration-300" style={{ width: `${downloadProgress}%` }} />
+                        </div>
                       )}
                     </div>
-                    {model === m.id && <CheckCircle className="w-3.5 h-3.5 text-iron-accent-light" />}
-                  </div>
-                  <span className="block text-[10px] text-iron-text-muted mt-0.5">{m.description}</span>
-                </button>
-              ))}
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Info card */}
+          {/* Info card — contextual per provider */}
           <Card variant="default" padding="md">
             <div className="flex items-start gap-2.5">
               <Info className="w-4 h-4 text-iron-text-muted flex-shrink-0 mt-0.5" />
               <div className="text-xs text-iron-text-muted leading-relaxed">
-                <p>
-                  AI Assist uses your own CLI tools — <strong className="text-iron-text">GitHub Copilot CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">gh copilot</code>) or <strong className="text-iron-text">Claude Code CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">claude</code>).
-                </p>
-                <p className="mt-1.5">
-                  Your credentials stay on your machine. IronMic never sees or stores your API keys — it calls the CLI directly.
-                </p>
+                {provider === 'local' ? (
+                  <>
+                    <p>
+                      Local LLM runs <strong className="text-iron-text">entirely on your device</strong> — no internet connection or API keys required. All processing stays on-machine.
+                    </p>
+                    <p className="mt-1.5">
+                      Models use 4-8 GB of RAM during inference. Performance depends on your hardware (CPU/GPU). Response times are typically a few seconds per message.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p>
+                      AI Assist uses your own CLI tools — <strong className="text-iron-text">GitHub Copilot CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">gh copilot</code>) or <strong className="text-iron-text">Claude Code CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">claude</code>).
+                    </p>
+                    <p className="mt-1.5">
+                      Your credentials stay on your machine. IronMic never sees or stores your API keys — it calls the CLI directly.
+                    </p>
+                  </>
+                )}
               </div>
             </div>
           </Card>

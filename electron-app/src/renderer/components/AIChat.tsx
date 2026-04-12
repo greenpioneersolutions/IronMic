@@ -19,7 +19,7 @@ export function AIChat() {
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState('');
   const [provider, setProvider] = useState<AIProvider | null>(null);
-  const [authState, setAuthState] = useState<{ copilot: AuthStatus; claude: AuthStatus } | null>(null);
+  const [authState, setAuthState] = useState<{ copilot: AuthStatus; claude: AuthStatus; local: AuthStatus } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSessions, setShowSessions] = useState(false);
   const [showNotePicker, setShowNotePicker] = useState(false);
@@ -78,15 +78,15 @@ export function AIChat() {
       setAuthState(state);
       // Use saved provider preference, fall back to auto-pick
       const savedProvider = await window.ironmic.getSetting('ai_provider');
-      if (savedProvider && (savedProvider === 'claude' || savedProvider === 'copilot')) {
-        const auth = savedProvider === 'claude' ? state.claude : state.copilot;
+      if (savedProvider && (savedProvider === 'claude' || savedProvider === 'copilot' || savedProvider === 'local')) {
+        const auth = savedProvider === 'claude' ? state.claude : savedProvider === 'copilot' ? state.copilot : state.local;
         if (auth?.authenticated) {
-          setProvider(savedProvider);
+          setProvider(savedProvider as AIProvider);
           return;
         }
       }
       const best = await window.ironmic.aiPickProvider();
-      setProvider(best);
+      setProvider(best as AIProvider | null);
     } catch (err) {
       console.error('Failed to load AI auth:', err);
     }
@@ -333,6 +333,12 @@ export function AIChat() {
                   status={authState.copilot}
                   active={provider === 'copilot'}
                   onClick={() => authState.copilot.authenticated && setProvider('copilot')}
+                />
+                <ProviderPill
+                  name="Local"
+                  status={authState.local}
+                  active={provider === 'local'}
+                  onClick={() => authState.local?.authenticated && setProvider('local')}
                 />
               </div>
             )}

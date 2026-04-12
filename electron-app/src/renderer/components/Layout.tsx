@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Mic, Settings, List, Sparkles, StickyNote, Search, Home,
-  ChevronLeft, ChevronRight, Volume2, PenTool,
+  ChevronLeft, ChevronRight, Volume2, PenTool, BarChart3,
 } from 'lucide-react';
 import { RecordingIndicator } from './RecordingIndicator';
 import { Timeline } from './Timeline';
@@ -12,6 +12,7 @@ import { SearchPage } from './SearchPage';
 import { WelcomePage } from './WelcomePage';
 import { ListenPage } from './ListenPage';
 import { DictatePage } from './DictatePage';
+import { AnalyticsPage } from './AnalyticsPage';
 import { useTheme } from '../hooks/useTheme';
 import { GpuPrompt } from './GpuPrompt';
 import { SessionLock } from './SessionLock';
@@ -26,7 +27,7 @@ import micRecording from '../assets/mic-recording.png';
 import micProcessing from '../assets/mic-processing.png';
 import micSuccess from '../assets/mic-success.png';
 
-type Page = 'home' | 'main' | 'ai' | 'dictate' | 'listen' | 'notes' | 'search' | 'settings';
+type Page = 'home' | 'main' | 'ai' | 'dictate' | 'listen' | 'notes' | 'search' | 'analytics' | 'settings';
 
 interface NavItem {
   id: Page;
@@ -43,6 +44,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'listen', label: 'Listen', icon: Volume2, section: 'tools' },
   { id: 'notes', label: 'Notes', icon: StickyNote, section: 'tools' },
   { id: 'search', label: 'Search', icon: Search, section: 'tools' },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3, section: 'tools' },
   { id: 'settings', label: 'Settings', icon: Settings, section: 'system' },
 ];
 
@@ -175,7 +177,7 @@ export function Layout() {
   useEffect(() => {
     const handler = (e: Event) => {
       const target = (e as CustomEvent).detail as string;
-      if (['home', 'main', 'ai', 'dictate', 'listen', 'notes', 'search', 'settings'].includes(target)) {
+      if (['home', 'main', 'ai', 'dictate', 'listen', 'notes', 'search', 'analytics', 'settings'].includes(target)) {
         setPage(target as Page);
       }
     };
@@ -259,6 +261,7 @@ export function Layout() {
           {page === 'listen' && <ListenPage />}
           {page === 'notes' && <NotesPage />}
           {page === 'search' && <SearchPage />}
+          {page === 'analytics' && <AnalyticsPage />}
           {page === 'settings' && <SettingsPanel />}
         </div>
       </div>

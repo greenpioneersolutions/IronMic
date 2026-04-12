@@ -238,6 +238,100 @@ export function ModelManager() {
         </p>
         <LlmModelRow />
       </div>
+
+      {/* Chat Models */}
+      <ChatModelsSection />
+    </div>
+  );
+}
+
+function ChatModelsSection() {
+  const [localModels, setLocalModels] = useState<any[]>([]);
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [progress, setProgress] = useState<DownloadProgress | null>(null);
+
+  const loadStatus = async () => {
+    try {
+      const statuses = await window.ironmic.aiGetLocalModelStatus?.();
+      if (statuses) setLocalModels(statuses);
+    } catch { /* ignore if not available */ }
+  };
+
+  useEffect(() => {
+    loadStatus();
+    const cleanup = window.ironmic.onModelDownloadProgress((prog: DownloadProgress) => {
+      if (!prog.model?.startsWith('llm')) return;
+      if (prog.model === 'llm' && downloading !== 'llm') return; // Only track if we initiated
+      setProgress(prog);
+      if (prog.status === 'complete') { setDownloading(null); setProgress(null); loadStatus(); }
+      if (prog.status === 'error') { setDownloading(null); }
+    });
+    return cleanup;
+  }, [downloading]);
+
+  const handleDownload = async (modelId: string) => {
+    setDownloading(modelId);
+    try {
+      await window.ironmic.downloadModel(modelId);
+    } catch {
+      setDownloading(null);
+    }
+  };
+
+  if (localModels.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] font-semibold text-iron-text-muted uppercase tracking-wider">
+        AI Assist Chat Models
+      </p>
+      <p className="text-xs text-iron-text-muted">
+        Local LLMs for the AI Assist chat feature. Download any model to use it as an on-device AI.
+      </p>
+      {localModels.map((m: any) => {
+        const isDownloading = downloading === m.id;
+        return (
+          <Card key={m.id} variant="default" padding="md">
+            <div className="flex items-start justify-between">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-iron-text">{m.label}</p>
+                  <span className="text-[10px] text-iron-text-muted">{m.sizeLabel}</span>
+                </div>
+                <p className="text-xs text-iron-text-muted mt-0.5">{m.description}</p>
+              </div>
+              <div className="ml-3 flex-shrink-0">
+                {m.downloaded ? (
+                  <Badge variant="success">Ready</Badge>
+                ) : isDownloading ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-iron-accent" />
+                ) : (
+                  <Button size="sm" icon={<Download className="w-3 h-3" />} onClick={() => handleDownload(m.id)}>
+                    Download
+                  </Button>
+                )}
+              </div>
+            </div>
+            {isDownloading && progress && (
+              <div className="mt-2.5">
+                <div className="w-full h-1 bg-iron-surface-active rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-accent rounded-full transition-all duration-300"
+                    style={{ width: `${progress.percent}%` }}
+                  />
+                </div>
+                <p className="text-[10px] text-iron-text-muted mt-1">
+                  {progress.status === 'fallback'
+                    ? 'Primary source unavailable, trying fallback...'
+                    : progress.status === 'verifying'
+                    ? 'Verifying integrity...'
+                    : `${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)} (${progress.percent}%)`}
+                </p>
+              </div>
+            )}
+          </Card>
+        );
+      })}
     </div>
   );
 }

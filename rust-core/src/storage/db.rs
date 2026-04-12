@@ -7,7 +7,7 @@ use tracing::info;
 use crate::error::IronMicError;
 
 /// Schema version for migration tracking.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Get the platform-appropriate app data directory for IronMic.
 pub fn app_data_dir() -> PathBuf {
@@ -119,6 +119,10 @@ impl Database {
             self.migrate_v1(&conn)?;
         }
 
+        if current_version < 2 {
+            self.migrate_v2(&conn)?;
+        }
+
         // Update version
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -201,6 +205,53 @@ impl Database {
         .map_err(|e| IronMicError::Storage(format!("Migration v1 failed: {e}")))?;
 
         info!("Migration v1 applied: created entries, dictionary, settings tables");
+        Ok(())
+    }
+
+    /// Migration v2: Create analytics tables.
+    fn migrate_v2(&self, conn: &Connection) -> Result<(), IronMicError> {
+        conn.execute_batch(
+            "
+            -- Pre-computed daily aggregates for fast dashboard loading
+            CREATE TABLE IF NOT EXISTS analytics_snapshots (
+                date TEXT PRIMARY KEY,
+                word_count INTEGER NOT NULL DEFAULT 0,
+                sentence_count INTEGER NOT NULL DEFAULT 0,
+                entry_count INTEGER NOT NULL DEFAULT 0,
+                total_duration_seconds REAL NOT NULL DEFAULT 0.0,
+                unique_word_count INTEGER NOT NULL DEFAULT 0,
+                avg_sentence_length REAL NOT NULL DEFAULT 0.0,
+                avg_words_per_minute REAL NOT NULL DEFAULT 0.0,
+                source_app_breakdown TEXT,
+                top_words TEXT,
+                computed_at TEXT NOT NULL
+            );
+
+            -- Per-entry LLM topic classifications
+            CREATE TABLE IF NOT EXISTS entry_topics (
+                entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+                topic TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                classified_at TEXT NOT NULL,
+                PRIMARY KEY (entry_id, topic)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_entry_topics_topic ON entry_topics(topic);
+
+            -- Daily topic aggregates for trend charts
+            CREATE TABLE IF NOT EXISTS analytics_topic_snapshots (
+                date TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                entry_count INTEGER NOT NULL DEFAULT 0,
+                word_count INTEGER NOT NULL DEFAULT 0,
+                computed_at TEXT NOT NULL,
+                PRIMARY KEY (date, topic)
+            );
+            ",
+        )
+        .map_err(|e| IronMicError::Storage(format!("Migration v2 failed: {e}")))?;
+
+        info!("Migration v2 applied: created analytics tables");
         Ok(())
     }
 }

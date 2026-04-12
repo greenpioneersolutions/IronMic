@@ -17,7 +17,6 @@ mod napi_exports {
 
     use crate::audio::capture::CaptureEngine;
     use crate::audio::processor;
-    use crate::llm::cleanup::{LlmEngine, SharedLlmEngine};
     use crate::transcription::dictionary::Dictionary;
     use crate::transcription::whisper::{SharedWhisperEngine, WhisperConfig, WhisperEngine};
 
@@ -33,10 +32,6 @@ mod napi_exports {
                 Dictionary::new(),
             ))
         });
-
-    /// Global LLM engine.
-    static LLM_ENGINE: std::sync::LazyLock<SharedLlmEngine> =
-        std::sync::LazyLock::new(|| SharedLlmEngine::new(LlmEngine::with_defaults()));
 
     /// Initialize the tracing subscriber for structured logging.
     pub(crate) fn init_tracing() {
@@ -156,20 +151,15 @@ mod napi_exports {
         Ok(transcript)
     }
 
-    /// Polish raw transcript text using the local LLM.
+    /// Polish raw transcript text using the local LLM subprocess.
+    /// Note: actual LLM inference happens in the ironmic-llm binary.
+    /// This stub returns text unchanged — Electron routes through LlmSubprocess instead.
     #[napi]
     pub async fn polish_text(raw_text: String) -> napi::Result<String> {
-        init_tracing();
-        info!("polishText called from N-API");
-
-        let llm = LLM_ENGINE.clone();
-
-        // Load model if not already loaded
-        if !llm.is_loaded() {
-            llm.load_model().map_err(napi::Error::from)?;
-        }
-
-        llm.polish_text(&raw_text).map_err(napi::Error::from)
+        // LLM inference moved to ironmic-llm subprocess to avoid ggml symbol collision.
+        // This stub preserves the N-API surface for backward compat.
+        // Electron's ipc-handlers routes polish through LlmSubprocess when available.
+        Ok(raw_text)
     }
 
     // ── Storage N-API exports ──
@@ -252,7 +242,14 @@ mod napi_exports {
             duration_seconds: entry.duration_seconds,
             source_app: entry.source_app,
         };
-        store.create(new).map(Into::into).map_err(Into::into)
+        let result = store.create(new).map(Into::into).map_err(napi::Error::from)?;
+
+        // Update today's analytics snapshot incrementally
+        let analytics = AnalyticsStore::new(DATABASE.clone());
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let _ = analytics.compute_daily_snapshot(&today);
+
+        Ok(result)
     }
 
     #[napi]
@@ -393,6 +390,132 @@ mod napi_exports {
         store.set(&key, &value).map_err(Into::into)
     }
 
+    // ── Analytics N-API exports ──
+
+    use crate::storage::analytics::AnalyticsStore;
+
+    #[napi]
+    pub fn analytics_recompute_today() -> napi::Result<()> {
+        init_tracing();
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        store.compute_daily_snapshot(&today).map_err(napi::Error::from)?;
+        Ok(())
+    }
+
+    #[napi]
+    pub async fn analytics_backfill() -> napi::Result<u32> {
+        init_tracing();
+        info!("analytics_backfill called from N-API");
+        let store = AnalyticsStore::new(DATABASE.clone());
+        store.backfill_all().map_err(napi::Error::from)
+    }
+
+    #[napi]
+    pub fn analytics_get_overview(period: String) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let stats = store.get_overview(&period).map_err(napi::Error::from)?;
+        serde_json::to_string(&stats)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_daily_trend(from_date: String, to_date: String) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let trend = store.get_daily_trend(&from_date, &to_date).map_err(napi::Error::from)?;
+        serde_json::to_string(&trend)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_top_words(from_date: String, to_date: String, limit: u32) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let words = store.get_top_words(&from_date, &to_date, limit).map_err(napi::Error::from)?;
+        serde_json::to_string(&words)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_source_breakdown(from_date: String, to_date: String) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let breakdown = store.get_source_breakdown(&from_date, &to_date).map_err(napi::Error::from)?;
+        serde_json::to_string(&breakdown)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_vocabulary_richness(from_date: String, to_date: String) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let richness = store.get_vocabulary_richness(&from_date, &to_date).map_err(napi::Error::from)?;
+        serde_json::to_string(&richness)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_streaks() -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let streaks = store.get_streaks().map_err(napi::Error::from)?;
+        serde_json::to_string(&streaks)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_productivity_comparison() -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let comparison = store.get_productivity_comparison().map_err(napi::Error::from)?;
+        serde_json::to_string(&comparison)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_topic_breakdown(from_date: String, to_date: String) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let breakdown = store.get_topic_breakdown(&from_date, &to_date).map_err(napi::Error::from)?;
+        serde_json::to_string(&breakdown)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub fn analytics_get_topic_trends(from_date: String, to_date: String) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let trends = store.get_topic_trends(&from_date, &to_date).map_err(napi::Error::from)?;
+        serde_json::to_string(&trends)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    #[napi]
+    pub async fn analytics_classify_topics_batch(_batch_size: u32) -> napi::Result<u32> {
+        // Topic classification moved to ironmic-llm subprocess.
+        // This stub returns 0 — Electron routes through LlmSubprocess instead.
+        Ok(0)
+    }
+
+    /// Get unclassified entries with their text, for topic classification.
+    /// Returns JSON array of [id, text] pairs.
+    #[napi]
+    pub fn analytics_get_unclassified_entries(limit: u32) -> napi::Result<String> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        let entries = store.get_unclassified_entry_ids(limit).map_err(napi::Error::from)?;
+        serde_json::to_string(&entries)
+            .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
+    }
+
+    /// Save topic classification results for an entry.
+    /// topics_json: JSON array of [topic, confidence] pairs.
+    #[napi]
+    pub fn analytics_save_entry_topics(entry_id: String, topics_json: String) -> napi::Result<()> {
+        let topics: Vec<(String, f64)> = serde_json::from_str(&topics_json)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid topics JSON: {e}")))?;
+        let store = AnalyticsStore::new(DATABASE.clone());
+        store.save_entry_topics(&entry_id, &topics).map_err(napi::Error::from)
+    }
+
+    #[napi]
+    pub fn analytics_get_unclassified_count() -> napi::Result<u32> {
+        let store = AnalyticsStore::new(DATABASE.clone());
+        store.get_unclassified_count().map_err(napi::Error::from)
+    }
+
     // ── Clipboard N-API export ──
 
     #[napi]
@@ -455,9 +578,9 @@ mod napi_exports {
             .map(|m| m.len() as i64)
             .unwrap_or(0);
 
-        let llm_loaded = LLM_ENGINE.is_loaded();
-        let llm_path = LLM_ENGINE.model_path();
-        let llm_size = std::fs::metadata(&llm_path)
+        // LLM runs in separate subprocess — report file status only
+        let llm_model_path = crate::llm::cleanup::default_model_path();
+        let llm_size = std::fs::metadata(&llm_model_path)
             .map(|m| m.len() as i64)
             .unwrap_or(0);
 
@@ -468,7 +591,7 @@ mod napi_exports {
                 size_bytes: whisper_size,
             },
             llm: JsModelInfo {
-                loaded: llm_loaded,
+                loaded: llm_size > 0,
                 name: "mistral-7b-instruct-q4".into(),
                 size_bytes: llm_size,
             },

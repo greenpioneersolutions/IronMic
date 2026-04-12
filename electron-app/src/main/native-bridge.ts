@@ -80,6 +80,22 @@ function createStubs(): Record<string, (...args: any[]) => any> {
       whisper: { loaded: false, name: 'whisper-large-v3-turbo', sizeBytes: 0 },
       llm: { loaded: false, name: 'mistral-7b-instruct-q4', sizeBytes: 0 },
     }),
+    // Analytics stubs
+    analyticsRecomputeToday: () => {},
+    analyticsBackfill: async () => 0,
+    analyticsGetOverview: (_period: string) => JSON.stringify({ totalWords: 0, totalSentences: 0, totalEntries: 0, totalDurationSeconds: 0, avgWordsPerMinute: 0, uniqueWords: 0, avgSentenceLength: 0, period: _period }),
+    analyticsGetDailyTrend: () => '[]',
+    analyticsGetTopWords: () => '[]',
+    analyticsGetSourceBreakdown: () => '{}',
+    analyticsGetVocabularyRichness: () => JSON.stringify({ ttr: 0, uniqueCount: 0, totalCount: 0 }),
+    analyticsGetStreaks: () => JSON.stringify({ currentStreak: 0, longestStreak: 0, lastActiveDate: '' }),
+    analyticsGetProductivityComparison: () => JSON.stringify({ thisPeriodWords: 0, prevPeriodWords: 0, changePercent: 0, periodLabel: 'week' }),
+    analyticsGetTopicBreakdown: () => '[]',
+    analyticsGetTopicTrends: () => '[]',
+    analyticsClassifyTopicsBatch: async () => 0,
+    analyticsGetUnclassifiedEntries: () => '[]',
+    analyticsSaveEntryTopics: () => {},
+    analyticsGetUnclassifiedCount: () => 0,
   };
 }
 

@@ -46,7 +46,7 @@ const api = {
   getPipelineState: () => ipcRenderer.invoke('ironmic:get-pipeline-state'),
   resetPipelineState: () => ipcRenderer.invoke('ironmic:reset-pipeline-state'),
   getModelStatus: () => ipcRenderer.invoke('ironmic:get-model-status'),
-  downloadModel: (model: 'whisper' | 'llm') => ipcRenderer.invoke('ironmic:download-model', model),
+  downloadModel: (model: string) => ipcRenderer.invoke('ironmic:download-model', model),
 
   // Whisper model & GPU config
   getAvailableWhisperModels: () => ipcRenderer.invoke('ironmic:get-available-whisper-models'),
@@ -71,6 +71,21 @@ const api = {
   ttsIsLoaded: () => ipcRenderer.invoke('ironmic:tts-is-loaded'),
   ttsToggle: () => ipcRenderer.invoke('ironmic:tts-toggle'),
 
+  // Analytics
+  analyticsRecomputeToday: () => ipcRenderer.invoke('ironmic:analytics-recompute-today'),
+  analyticsBackfill: () => ipcRenderer.invoke('ironmic:analytics-backfill'),
+  analyticsGetOverview: (period: string) => ipcRenderer.invoke('ironmic:analytics-get-overview', period),
+  analyticsGetDailyTrend: (from: string, to: string) => ipcRenderer.invoke('ironmic:analytics-get-daily-trend', from, to),
+  analyticsGetTopWords: (from: string, to: string, limit: number) => ipcRenderer.invoke('ironmic:analytics-get-top-words', from, to, limit),
+  analyticsGetSourceBreakdown: (from: string, to: string) => ipcRenderer.invoke('ironmic:analytics-get-source-breakdown', from, to),
+  analyticsGetVocabularyRichness: (from: string, to: string) => ipcRenderer.invoke('ironmic:analytics-get-vocabulary-richness', from, to),
+  analyticsGetStreaks: () => ipcRenderer.invoke('ironmic:analytics-get-streaks'),
+  analyticsGetProductivityComparison: () => ipcRenderer.invoke('ironmic:analytics-get-productivity-comparison'),
+  analyticsGetTopicBreakdown: (from: string, to: string) => ipcRenderer.invoke('ironmic:analytics-get-topic-breakdown', from, to),
+  analyticsGetTopicTrends: (from: string, to: string) => ipcRenderer.invoke('ironmic:analytics-get-topic-trends', from, to),
+  analyticsClassifyTopicsBatch: (batchSize: number) => ipcRenderer.invoke('ironmic:analytics-classify-topics-batch', batchSize),
+  analyticsGetUnclassifiedCount: () => ipcRenderer.invoke('ironmic:analytics-get-unclassified-count'),
+
   // AI Chat
   aiGetAuthState: () => ipcRenderer.invoke('ai:get-auth-state'),
   aiRefreshAuth: (provider?: string) => ipcRenderer.invoke('ai:refresh-auth', provider),
@@ -79,6 +94,7 @@ const api = {
   aiGetModels: (provider?: string) => ipcRenderer.invoke('ai:get-models', provider),
   aiCancel: () => ipcRenderer.invoke('ai:cancel'),
   aiResetSession: () => ipcRenderer.invoke('ai:reset-session'),
+  aiGetLocalModelStatus: () => ipcRenderer.invoke('ai:local-model-status'),
   onAiOutput: (callback: (data: any) => void) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('ai:output', handler);
