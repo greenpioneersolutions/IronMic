@@ -136,6 +136,7 @@ export const IPC_CHANNELS = {
   // Manual model import
   IMPORT_MODEL: 'ironmic:import-model',
   IMPORT_MODEL_FROM_PATH: 'ironmic:import-model-from-path',
+  IMPORT_MULTI_PART_MODEL: 'ironmic:import-multi-part-model',
   OPEN_EXTERNAL: 'ironmic:open-external',
 
   // Events (main → renderer)

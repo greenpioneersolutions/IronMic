@@ -193,6 +193,7 @@ const api = {
   importModel: () => ipcRenderer.invoke('ironmic:import-model'),
   getImportableModels: () => ipcRenderer.invoke('ironmic:get-importable-models'),
   importModelFromPath: (filePath: string, sectionFilter: string) => ipcRenderer.invoke('ironmic:import-model-from-path', filePath, sectionFilter),
+  importMultiPartModel: () => ipcRenderer.invoke('ironmic:import-multi-part-model'),
   openExternal: (url: string) => ipcRenderer.invoke('ironmic:open-external', url),
 
   // Events from main process
