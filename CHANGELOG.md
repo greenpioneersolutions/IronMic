@@ -2,13 +2,17 @@
 
 All notable changes to IronMic will be documented in this file.
 
-## [1.2.1] - 2026-04-14
+## [1.2.2] - 2026-04-14
+
+### Added
+- **Multi-part model import** — New "Import Multi-Part" button for models that are split into parts on GitHub Releases (Mistral 7B, Llama 3.1, Phi-3). Select all `.part0`, `.part1`, `.part2` files at once — IronMic sorts them by part number, concatenates them into one file, and verifies the SHA-256 checksum. No manual assembly needed.
+- **GitHub Releases download links** — Import sections now show direct download links to your GitHub Releases (`models-v1` tag) for single-file models (Whisper, TTS). For multi-part models, each part is listed individually with its own download link, plus a HuggingFace link for the single-file alternative.
+- **Two import modes side by side** — "Import Single File" for complete models, "Import Multi-Part" for split files. The multi-part button only appears in sections that have split models.
 
 ### Changed
-- **Always-visible model import sections** — Every model category (Speech Recognition, Text Cleanup, Chat, TTS) now has a permanent "Import Model" section at the bottom, not hidden behind download errors. Expand it anytime to see recommended models with browser download links and a one-click file import button.
-- **Per-section import** — Import buttons are labeled with the target section (e.g. "Choose File & Import to Speech Recognition") so you know exactly where the model is going.
-- **Error messages direct to import** — When a download fails, the error now tells you to use the import section below instead of just showing the error.
-- **Open download links in browser** — Model download URLs now open in your system browser (bypasses the app's network restrictions) via a new `openExternal` IPC channel.
+- **Always-visible model import sections** — Every model category (Speech Recognition, Text Cleanup, Chat, TTS) now has a permanent "Import Model" section at the bottom, not hidden behind download errors.
+- **Error messages direct to import** — When a download fails, the error tells you to use the import section below.
+- **Download URLs default to GitHub Releases** — Single-file models link to your own GitHub Releases instead of HuggingFace. Multi-part models still link to HuggingFace for the single-file download option.
 
 ---
 

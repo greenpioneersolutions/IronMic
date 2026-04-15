@@ -3,15 +3,13 @@
  * Each model area (Whisper, LLM, Chat, TTS) embeds one of these so the user
  * can import directly into the right place.
  *
- * Flow:
- *  1. User clicks "Choose File" → native file picker opens
- *  2. Selected file shown with name + size for confirmation
- *  3. User clicks "Import" → file is copied to models dir
- *  4. Success/error feedback inline
+ * Two import modes:
+ *  - Single file: for complete model files (.bin, .gguf, .onnx)
+ *  - Multi-part: select all .partN files, app assembles them automatically
  */
 
 import { useState, useEffect } from 'react';
-import { Upload, CheckCircle, AlertTriangle, FolderOpen, FileBox, ExternalLink, X, Loader2 } from 'lucide-react';
+import { Upload, CheckCircle, AlertTriangle, FolderOpen, FileBox, ExternalLink, X, Loader2, Layers } from 'lucide-react';
 
 interface ImportableModel {
   modelId: string;
@@ -19,49 +17,37 @@ interface ImportableModel {
   filename: string;
   downloadUrl: string;
   downloaded: boolean;
+  parts?: { filename: string; url: string }[];
 }
 
 interface Props {
-  /** Section label shown in the header, e.g. "Speech Recognition" */
   sectionLabel: string;
-  /** Filter to only show models relevant to this section */
   filter: 'whisper' | 'llm' | 'tts' | 'chat' | 'all';
-  /** Callback after successful import — refresh model statuses */
   onImported: () => void;
-  /** Optional: highlight/expand when a download error just occurred */
   highlightOnError?: boolean;
 }
 
 export function ModelImportSection({ sectionLabel, filter, onImported, highlightOnError }: Props) {
   const [models, setModels] = useState<ImportableModel[]>([]);
   const [expanded, setExpanded] = useState(false);
-
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Auto-expand when an error triggers highlightOnError
   useEffect(() => {
-    if (highlightOnError) {
-      setExpanded(true);
-    }
+    if (highlightOnError) setExpanded(true);
   }, [highlightOnError]);
 
-  useEffect(() => {
-    loadModels();
-  }, []);
+  useEffect(() => { loadModels(); }, []);
 
   async function loadModels() {
     try {
       const json = await window.ironmic.getImportableModels();
       const all: ImportableModel[] = JSON.parse(json);
-      const filtered = filterModels(all, filter);
-      setModels(filtered);
-    } catch {
-      setModels([]);
-    }
+      setModels(filterModels(all, filter));
+    } catch { setModels([]); }
   }
 
-  async function handleImport() {
+  async function handleSingleImport() {
     setImporting(true);
     setImportResult(null);
     try {
@@ -77,13 +63,31 @@ export function ModelImportSection({ sectionLabel, filter, onImported, highlight
     setImporting(false);
   }
 
+  async function handleMultiPartImport() {
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const result = await window.ironmic.importMultiPartModel();
+      if (result) {
+        setImportResult({
+          success: true,
+          message: `Assembled ${result.partCount} parts and imported "${result.label}" successfully. The model is ready to use.`,
+        });
+        onImported();
+        loadModels();
+      }
+    } catch (err: any) {
+      setImportResult({ success: false, message: err.message || 'Multi-part import failed' });
+    }
+    setImporting(false);
+  }
+
+  const hasMultiPartModels = models.some(m => m.parts && m.parts.length > 0);
   const allReady = models.length > 0 && models.every(m => m.downloaded);
 
   return (
     <div className={`rounded-xl border transition-colors ${
-      highlightOnError
-        ? 'border-amber-500/30 bg-amber-500/5'
-        : 'border-iron-border bg-iron-surface/50'
+      highlightOnError ? 'border-amber-500/30 bg-amber-500/5' : 'border-iron-border bg-iron-surface/50'
     }`}>
       {/* Header — always visible */}
       <button
@@ -93,69 +97,94 @@ export function ModelImportSection({ sectionLabel, filter, onImported, highlight
         <div className="flex items-center gap-2.5">
           <Upload className={`w-4 h-4 ${highlightOnError ? 'text-amber-400' : 'text-iron-text-muted'}`} />
           <div>
-            <p className="text-sm font-medium text-iron-text">
-              Import {sectionLabel} Model
-            </p>
+            <p className="text-sm font-medium text-iron-text">Import {sectionLabel} Model</p>
             <p className="text-[11px] text-iron-text-muted">
-              {allReady
-                ? 'All models ready — import a different version anytime'
-                : 'Have a model file? Import it directly'}
+              {allReady ? 'All models ready — import a different version anytime' : 'Have a model file? Import it directly'}
             </p>
           </div>
         </div>
-        <span className="text-xs text-iron-text-muted">
-          {expanded ? '▾' : '▸'}
-        </span>
+        <span className="text-xs text-iron-text-muted">{expanded ? '▾' : '▸'}</span>
       </button>
 
-      {/* Expanded content */}
       {expanded && (
         <div className="px-4 pb-4 space-y-3 border-t border-iron-border/50">
-          {/* Recommended models */}
+          {/* Recommended models with download links */}
           {models.length > 0 && (
-            <div className="pt-3 space-y-1.5">
+            <div className="pt-3 space-y-2">
               <p className="text-[11px] font-semibold text-iron-text-muted uppercase tracking-wider">
                 Recommended Models
               </p>
               <p className="text-[11px] text-iron-text-muted">
-                Download any of these from your browser, then import the file below.
+                Download in your browser, then import below. Links open in your default browser.
               </p>
               {models.map((m) => (
-                <div
-                  key={m.modelId}
-                  className={`flex items-center justify-between text-xs px-3 py-2.5 rounded-lg ${
-                    m.downloaded
-                      ? 'bg-green-500/5 border border-green-500/10'
-                      : 'bg-iron-surface border border-iron-border'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    {m.downloaded ? (
-                      <CheckCircle className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
-                    ) : (
-                      <FileBox className="w-3.5 h-3.5 text-iron-text-muted flex-shrink-0" />
-                    )}
-                    <div className="min-w-0">
-                      <p className="font-medium text-iron-text">{m.label}</p>
-                      <p className="text-[10px] text-iron-text-muted truncate">{m.filename}</p>
+                <div key={m.modelId} className={`text-xs rounded-lg ${
+                  m.downloaded ? 'bg-green-500/5 border border-green-500/10' : 'bg-iron-surface border border-iron-border'
+                }`}>
+                  {/* Model header */}
+                  <div className="flex items-center justify-between px-3 py-2.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {m.downloaded ? (
+                        <CheckCircle className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
+                      ) : (
+                        <FileBox className="w-3.5 h-3.5 text-iron-text-muted flex-shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <p className="font-medium text-iron-text">{m.label}</p>
+                        <p className="text-[10px] text-iron-text-muted truncate">{m.filename}</p>
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0 ml-2">
-                    {m.downloaded ? (
-                      <span className="text-[10px] text-green-400 font-medium">Ready</span>
-                    ) : (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          window.ironmic?.openExternal?.(m.downloadUrl);
-                        }}
-                        className="flex items-center gap-1 text-[10px] text-iron-accent-light hover:underline"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        Download
-                      </button>
+                    {m.downloaded && (
+                      <span className="text-[10px] text-green-400 font-medium flex-shrink-0 ml-2">Ready</span>
                     )}
                   </div>
+
+                  {/* Download links — shown for models that aren't downloaded */}
+                  {!m.downloaded && (
+                    <div className="px-3 pb-2.5 space-y-1.5">
+                      {m.parts && m.parts.length > 0 ? (
+                        <>
+                          {/* Multi-part model: show each part + single-file alternative */}
+                          <p className="text-[10px] text-iron-text-muted font-medium">
+                            GitHub Releases ({m.parts.length} parts — download all, then use "Import Multi-Part"):
+                          </p>
+                          <div className="space-y-0.5 ml-1">
+                            {m.parts.map((part, i) => (
+                              <button
+                                key={part.filename}
+                                onClick={() => window.ironmic?.openExternal?.(part.url)}
+                                className="flex items-center gap-1.5 text-[10px] text-iron-accent-light hover:underline"
+                              >
+                                <ExternalLink className="w-2.5 h-2.5" />
+                                Part {i + 1}: {part.filename}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-2 pt-1">
+                            <div className="flex-1 h-px bg-iron-border/30" />
+                            <span className="text-[9px] text-iron-text-muted">or</span>
+                            <div className="flex-1 h-px bg-iron-border/30" />
+                          </div>
+                          <button
+                            onClick={() => window.ironmic?.openExternal?.(m.downloadUrl)}
+                            className="flex items-center gap-1.5 text-[10px] text-iron-accent-light hover:underline"
+                          >
+                            <ExternalLink className="w-2.5 h-2.5" />
+                            Single file from HuggingFace (no parts needed)
+                          </button>
+                        </>
+                      ) : (
+                        /* Single-file model: one download link */
+                        <button
+                          onClick={() => window.ironmic?.openExternal?.(m.downloadUrl)}
+                          className="flex items-center gap-1.5 text-[10px] text-iron-accent-light hover:underline"
+                        >
+                          <ExternalLink className="w-2.5 h-2.5" />
+                          Download from {m.downloadUrl.includes('github.com') ? 'GitHub Releases' : 'HuggingFace'}
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -164,28 +193,49 @@ export function ModelImportSection({ sectionLabel, filter, onImported, highlight
           {/* Divider */}
           <div className="flex items-center gap-3 pt-1">
             <div className="flex-1 h-px bg-iron-border/50" />
-            <span className="text-[10px] text-iron-text-muted font-medium uppercase">Import a file</span>
+            <span className="text-[10px] text-iron-text-muted font-medium uppercase">Import</span>
             <div className="flex-1 h-px bg-iron-border/50" />
           </div>
 
-          {/* Import button — opens native file picker, validates, and copies */}
-          <button
-            onClick={handleImport}
-            disabled={importing}
-            className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium bg-iron-accent/10 text-iron-accent-light rounded-lg hover:bg-iron-accent/20 border border-iron-accent/15 transition-all disabled:opacity-50"
-          >
-            {importing ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Importing...
-              </>
-            ) : (
-              <>
-                <FolderOpen className="w-4 h-4" />
-                Choose File &amp; Import to {sectionLabel}
-              </>
+          {/* Import buttons */}
+          <div className={`${hasMultiPartModels ? 'grid grid-cols-2 gap-2' : ''}`}>
+            {/* Single file import */}
+            <button
+              onClick={handleSingleImport}
+              disabled={importing}
+              className="w-full flex items-center justify-center gap-2 px-3 py-3 text-xs font-medium bg-iron-accent/10 text-iron-accent-light rounded-lg hover:bg-iron-accent/20 border border-iron-accent/15 transition-all disabled:opacity-50"
+            >
+              {importing ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <FolderOpen className="w-3.5 h-3.5" />
+              )}
+              <span>{importing ? 'Importing...' : 'Import Single File'}</span>
+            </button>
+
+            {/* Multi-part import — only shown when relevant */}
+            {hasMultiPartModels && (
+              <button
+                onClick={handleMultiPartImport}
+                disabled={importing}
+                className="w-full flex items-center justify-center gap-2 px-3 py-3 text-xs font-medium bg-iron-surface text-iron-text-secondary rounded-lg hover:bg-iron-surface-hover border border-iron-border transition-all disabled:opacity-50"
+              >
+                {importing ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Layers className="w-3.5 h-3.5" />
+                )}
+                <span>{importing ? 'Assembling...' : 'Import Multi-Part'}</span>
+              </button>
             )}
-          </button>
+          </div>
+
+          {hasMultiPartModels && (
+            <p className="text-[10px] text-iron-text-muted leading-relaxed">
+              <strong>Single File</strong> — for complete .bin, .gguf, or .onnx files.{' '}
+              <strong>Multi-Part</strong> — select all .part0, .part1, .part2 files at once and IronMic will assemble them automatically.
+            </p>
+          )}
 
           {/* Result feedback */}
           {importResult && (
@@ -204,10 +254,11 @@ export function ModelImportSection({ sectionLabel, filter, onImported, highlight
           )}
 
           <p className="text-[10px] text-iron-text-muted leading-relaxed">
-            Supported formats: <code className="bg-iron-surface-active px-1 py-0.5 rounded">.bin</code>{' '}
+            Supported: <code className="bg-iron-surface-active px-1 py-0.5 rounded">.bin</code>{' '}
             <code className="bg-iron-surface-active px-1 py-0.5 rounded">.gguf</code>{' '}
-            <code className="bg-iron-surface-active px-1 py-0.5 rounded">.onnx</code>
-            {' '}— IronMic will copy the file to the correct location and validate it.
+            <code className="bg-iron-surface-active px-1 py-0.5 rounded">.onnx</code>{' '}
+            <code className="bg-iron-surface-active px-1 py-0.5 rounded">.part*</code>
+            {' '}— files are copied to the app's model directory and validated.
           </p>
         </div>
       )}
@@ -215,7 +266,7 @@ export function ModelImportSection({ sectionLabel, filter, onImported, highlight
   );
 }
 
-/** Backward-compatible wrapper — keeps old API working while we transition */
+/** Backward-compatible wrapper */
 export function ModelImportBanner({ visible, onDismiss, onImported, filter = 'all' }: {
   visible: boolean;
   onDismiss: () => void;
@@ -229,12 +280,7 @@ export function ModelImportBanner({ visible, onDismiss, onImported, filter = 'al
       <button onClick={onDismiss} className="absolute top-2 right-2 z-10 p-1 text-iron-text-muted hover:text-iron-text transition-colors">
         <X className="w-3.5 h-3.5" />
       </button>
-      <ModelImportSection
-        sectionLabel={label}
-        filter={filter === 'all' ? 'all' : filter}
-        onImported={onImported}
-        highlightOnError={true}
-      />
+      <ModelImportSection sectionLabel={label} filter={filter} onImported={onImported} highlightOnError={true} />
     </div>
   );
 }
