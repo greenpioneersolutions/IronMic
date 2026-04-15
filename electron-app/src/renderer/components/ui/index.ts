@@ -5,3 +5,5 @@ export { Toggle } from './Toggle';
 export { Modal } from './Modal';
 export { Table, TableHead, TableRow, TableHeader, TableCell } from './Table';
 export { Badge } from './Badge';
+export { PageHeader } from './PageHeader';
+export { EmptyState } from './EmptyState';

@@ -6,7 +6,7 @@
 
 import { spawn, ChildProcess } from 'child_process';
 import { BrowserWindow } from 'electron';
-import { CopilotAdapter } from './CopilotAdapter';
+import { CopilotAdapter, clearCopilotCache } from './CopilotAdapter';
 import { ClaudeAdapter } from './ClaudeAdapter';
 import { LocalLLMAdapter, getChatModelPath } from './LocalLLMAdapter';
 import { llmSubprocess } from './LlmSubprocess';
@@ -51,6 +51,8 @@ export class AIManager {
 
   /** Force re-check auth for a provider. */
   async refreshAuth(provider?: AIProvider): Promise<AIAuthState> {
+    // Clear binary caches so re-detection runs fresh
+    clearCopilotCache();
     if (provider) {
       delete this.authCache[provider];
       await this.checkAuth(provider);

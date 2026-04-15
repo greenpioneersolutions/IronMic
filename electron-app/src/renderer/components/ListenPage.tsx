@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
-import { Volume2, Play, Pause, Square, Trash2, Info } from 'lucide-react';
+import { Volume2, Play, Pause, Square, Trash2, Info, X } from 'lucide-react';
 import { useTtsStore } from '../stores/useTtsStore';
 import { HighlightedText } from './HighlightedText';
-import { Card } from './ui';
+import { Card, PageHeader } from './ui';
 
 interface ListenEntry {
   id: string;
@@ -13,6 +13,7 @@ interface ListenEntry {
 export function ListenPage() {
   const [input, setInput] = useState('');
   const [entries, setEntries] = useState<ListenEntry[]>([]);
+  const [showBannerDismissed, setShowBannerDismissed] = useState(() => !!localStorage.getItem('ironmic-listen-intro-seen'));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const {
@@ -56,35 +57,48 @@ export function ListenPage() {
     setEntries((prev) => prev.filter((e) => e.id !== id));
   };
 
+  // Listen for voice dictation results when recording from listen page
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { text, sourceApp } = (e as CustomEvent).detail;
+      if (sourceApp === 'listen' && text) {
+        // Add the dictated text as a new listen entry and auto-play
+        const entry: ListenEntry = {
+          id: Date.now().toString(),
+          text: text.trim(),
+          createdAt: Date.now(),
+        };
+        setEntries((prev) => [entry, ...prev]);
+        synthesizeAndPlay(text.trim(), entry.id);
+      }
+    };
+    window.addEventListener('ironmic:dictation-complete', handler);
+    return () => window.removeEventListener('ironmic:dictation-complete', handler);
+  }, [synthesizeAndPlay]);
+
   const progressPercent = durationMs > 0 ? Math.min((currentTimeMs / durationMs) * 100, 100) : 0;
 
   return (
     <div className="h-full flex flex-col">
-      {/* Header */}
-      <div className="px-6 pt-6 pb-4">
-        <div className="max-w-2xl mx-auto">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center">
-              <Volume2 className="w-5 h-5 text-emerald-400" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-iron-text">Listen</h2>
-              <p className="text-xs text-iron-text-muted">Hear text read aloud, privately on your machine</p>
-            </div>
-          </div>
+      <PageHeader icon={Volume2} iconColor="emerald-500" title="Listen" description="Hear text read aloud, privately on your machine" />
 
-          {/* Info banner */}
-          <Card variant="default" padding="md" className="mb-4">
-            <div className="flex items-start gap-2.5">
-              <Info className="w-4 h-4 text-iron-accent-light mt-0.5 flex-shrink-0" />
-              <p className="text-xs text-iron-text-muted leading-relaxed">
-                Paste or type any text below and it will be read aloud to you using the local Kokoro voice engine.
-                Everything stays on your device — nothing is sent anywhere.
-                The first playback may take a moment to start as the engine warms up.
-                You can adjust the voice and speed in <button onClick={() => window.dispatchEvent(new CustomEvent('ironmic:navigate', { detail: 'settings' }))} className="text-iron-accent-light hover:underline">Settings</button>.
-              </p>
-            </div>
-          </Card>
+      <div className="px-6 pt-4 pb-4">
+        <div className="max-w-2xl mx-auto">
+          {/* Dismissible info banner */}
+          {!showBannerDismissed && (
+            <Card variant="default" padding="md" className="mb-4">
+              <div className="flex items-start gap-2.5">
+                <Info className="w-4 h-4 text-iron-accent-light mt-0.5 flex-shrink-0" />
+                <p className="text-xs text-iron-text-muted leading-relaxed flex-1">
+                  Paste or type any text below and it will be read aloud using the local Kokoro voice engine.
+                  Everything stays on your device. Adjust voice and speed in Settings.
+                </p>
+                <button onClick={() => { localStorage.setItem('ironmic-listen-intro-seen', '1'); setShowBannerDismissed(true); }} className="p-0.5 text-iron-text-muted hover:text-iron-text transition-colors flex-shrink-0">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </Card>
+          )}
 
           {/* Text input */}
           <div className="relative">

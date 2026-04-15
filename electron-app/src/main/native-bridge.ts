@@ -132,24 +132,57 @@ export const native = {
   resetPipelineState(): void { this.addon.resetPipelineState(); },
   getModelStatus(): any { return this.addon.getModelStatus(); },
 
-  // Audio devices
-  listAudioDevices(): string { return this.addon.listAudioDevices(); },
-  getCurrentAudioDevice(): string { return this.addon.getCurrentAudioDevice(); },
+  // Audio devices (may not exist in older native addon builds)
+  listAudioDevices(): string {
+    if (typeof this.addon.listAudioDevices === 'function') return this.addon.listAudioDevices();
+    return '[]';
+  },
+  getCurrentAudioDevice(): string {
+    if (typeof this.addon.getCurrentAudioDevice === 'function') return this.addon.getCurrentAudioDevice();
+    return JSON.stringify({ name: null, available: false, sampleRate: 0, channels: 0, sampleFormat: null });
+  },
 
-  // Meeting templates
-  createMeetingTemplate(name: string, meetingType: string, sections: string, llmPrompt: string, displayLayout: string): string { return this.addon.createMeetingTemplate(name, meetingType, sections, llmPrompt, displayLayout); },
-  getMeetingTemplate(id: string): string { return this.addon.getMeetingTemplate(id); },
-  listMeetingTemplates(): string { return this.addon.listMeetingTemplates(); },
-  updateMeetingTemplate(id: string, name: string, meetingType: string, sections: string, llmPrompt: string, displayLayout: string): void { this.addon.updateMeetingTemplate(id, name, meetingType, sections, llmPrompt, displayLayout); },
-  deleteMeetingTemplate(id: string): void { this.addon.deleteMeetingTemplate(id); },
-  createMeetingSessionWithTemplate(templateId?: string, detectedApp?: string): string { return this.addon.createMeetingSessionWithTemplate(templateId, detectedApp); },
-  setMeetingStructuredOutput(id: string, structuredOutput: string): void { this.addon.setMeetingStructuredOutput(id, structuredOutput); },
+  // Meeting templates (v1.3.0+ — guard for older addon builds)
+  createMeetingTemplate(name: string, meetingType: string, sections: string, llmPrompt: string, displayLayout: string): string {
+    return this._call('createMeetingTemplate', '{}', name, meetingType, sections, llmPrompt, displayLayout);
+  },
+  getMeetingTemplate(id: string): string { return this._call('getMeetingTemplate', 'null', id); },
+  listMeetingTemplates(): string { return this._call('listMeetingTemplates', '[]'); },
+  updateMeetingTemplate(id: string, name: string, meetingType: string, sections: string, llmPrompt: string, displayLayout: string): void {
+    this._call('updateMeetingTemplate', undefined, id, name, meetingType, sections, llmPrompt, displayLayout);
+  },
+  deleteMeetingTemplate(id: string): void { this._call('deleteMeetingTemplate', undefined, id); },
+  createMeetingSessionWithTemplate(templateId?: string, detectedApp?: string): string {
+    return this._call('createMeetingSessionWithTemplate', '{}', templateId, detectedApp);
+  },
+  setMeetingStructuredOutput(id: string, structuredOutput: string): void {
+    this._call('setMeetingStructuredOutput', undefined, id, structuredOutput);
+  },
+  setMeetingRawTranscript(id: string, rawTranscript: string): void {
+    this._call('setMeetingRawTranscript', undefined, id, rawTranscript);
+  },
+  renameMeetingSession(id: string, name: string): void {
+    this._call('renameMeetingSession', undefined, id, name);
+  },
 
-  // Export / Sharing
-  copyHtmlToClipboard(html: string, fallbackText: string): void { this.addon.copyHtmlToClipboard(html, fallbackText); },
-  exportEntryMarkdown(id: string): string { return this.addon.exportEntryMarkdown(id); },
-  exportEntryJson(id: string): string { return this.addon.exportEntryJson(id); },
-  exportEntryPlainText(id: string): string { return this.addon.exportEntryPlainText(id); },
-  exportMeetingMarkdown(id: string): string { return this.addon.exportMeetingMarkdown(id); },
-  textToHtml(text: string): string { return this.addon.textToHtml(text); },
+  // Export / Sharing (v1.3.0+ — guard for older addon builds)
+  copyHtmlToClipboard(html: string, fallbackText: string): void {
+    // Fall back to plain text clipboard if HTML not available
+    if (typeof this.addon.copyHtmlToClipboard === 'function') {
+      this.addon.copyHtmlToClipboard(html, fallbackText);
+    } else {
+      this.addon.copyToClipboard(fallbackText);
+    }
+  },
+  exportEntryMarkdown(id: string): string { return this._call('exportEntryMarkdown', '', id); },
+  exportEntryJson(id: string): string { return this._call('exportEntryJson', '{}', id); },
+  exportEntryPlainText(id: string): string { return this._call('exportEntryPlainText', '', id); },
+  exportMeetingMarkdown(id: string): string { return this._call('exportMeetingMarkdown', '', id); },
+  textToHtml(text: string): string { return this._call('textToHtml', `<p>${text}</p>`, text); },
+
+  /** Helper: call an addon function if it exists, otherwise return a fallback. */
+  _call(fn: string, fallback: any, ...args: any[]): any {
+    if (typeof this.addon[fn] === 'function') return this.addon[fn](...args);
+    if (fallback !== undefined) return fallback;
+  },
 };

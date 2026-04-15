@@ -187,6 +187,9 @@ const api = {
   meetingDelete: (id: string) => ipcRenderer.invoke('ironmic:meeting-delete', id),
   meetingCreateWithTemplate: (templateId: string | null, detectedApp: string | null) => ipcRenderer.invoke('ironmic:meeting-create-with-template', templateId, detectedApp),
   meetingSetStructuredOutput: (id: string, structuredOutput: string) => ipcRenderer.invoke('ironmic:meeting-set-structured-output', id, structuredOutput),
+  meetingSetRawTranscript: (id: string, rawTranscript: string) => ipcRenderer.invoke('ironmic:meeting-set-raw-transcript', id, rawTranscript),
+  meetingRename: (id: string, name: string) => ipcRenderer.invoke('ironmic:meeting-rename', id, name),
+  meetingSearch: (query: string, limit: number) => ipcRenderer.invoke('ironmic:meeting-search', query, limit),
 
   // ── Audio Input ──
   listAudioDevices: () => ipcRenderer.invoke('ironmic:list-audio-devices'),

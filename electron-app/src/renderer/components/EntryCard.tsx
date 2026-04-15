@@ -27,9 +27,8 @@ interface EntryCardProps {
 }
 
 export function EntryCard({ entry, onDelete, onPin, onArchive, onPolish, onTagClick }: EntryCardProps) {
-  const [displayMode, setDisplayMode] = useState<'raw' | 'polished'>(
-    entry.polishedText ? 'polished' : 'raw'
-  );
+  // Always show raw text by default — user clicks "Polish" to see cleaned version
+  const [displayMode, setDisplayMode] = useState<'raw' | 'polished'>('raw');
   const { state: ttsState, timestamps, currentTimeMs, activeEntryId } = useTtsStore();
 
   const text = displayMode === 'polished' && entry.polishedText

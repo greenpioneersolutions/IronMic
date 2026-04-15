@@ -33,6 +33,29 @@ export function NotesPage() {
     }
   }, [activeNoteId]);
 
+  // Listen for voice dictation results when recording from notes page
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { text, sourceApp } = (e as CustomEvent).detail;
+      if (sourceApp === 'notes' && text) {
+        if (activeNoteId) {
+          // Append to active note
+          const note = useNotesStore.getState().getNote(activeNoteId);
+          if (note) {
+            const newContent = note.content ? note.content + '\n' + text.trim() : text.trim();
+            updateNote(activeNoteId, { content: newContent });
+          }
+        } else {
+          // Create a new note with the dictated text
+          const id = createNote();
+          updateNote(id, { content: text.trim() });
+        }
+      }
+    };
+    window.addEventListener('ironmic:dictation-complete', handler);
+    return () => window.removeEventListener('ironmic:dictation-complete', handler);
+  }, [activeNoteId, createNote, updateNote]);
+
   const handleCreateNotebook = () => {
     if (!newNotebookName.trim()) return;
     createNotebook(newNotebookName.trim());

@@ -79,6 +79,15 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
   setActiveResult: (result) => set({ activeResult: result }),
   setDetectedApp: (app) => set({ detectedApp: app }),
 
+  renameSession: async (id: string, name: string) => {
+    try {
+      await window.ironmic.meetingRename(id, name);
+      await get().loadSessions();
+    } catch (err) {
+      console.error('[useMeetingStore] Failed to rename session:', err);
+    }
+  },
+
   deleteSession: async (id) => {
     try {
       await window.ironmic.meetingDelete(id);

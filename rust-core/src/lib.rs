@@ -1225,6 +1225,12 @@ mod napi_exports {
     }
 
     #[napi]
+    pub fn search_meeting_sessions(query: String, limit: u32) -> napi::Result<String> {
+        let sessions = DATABASE.search_meeting_sessions(&query, limit).map_err(Into::<napi::Error>::into)?;
+        serde_json::to_string(&sessions).map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    #[napi]
     pub fn delete_meeting_session(id: String) -> napi::Result<()> {
         DATABASE.delete_meeting_session(&id).map_err(Into::into)
     }
@@ -1294,6 +1300,16 @@ mod napi_exports {
     }
 
     #[napi]
+    pub fn rename_meeting_session(id: String, name: String) -> napi::Result<()> {
+        DATABASE.rename_meeting_session(&id, &name).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn set_meeting_raw_transcript(id: String, raw_transcript: String) -> napi::Result<()> {
+        DATABASE.set_meeting_raw_transcript(&id, &raw_transcript).map_err(Into::into)
+    }
+
+    #[napi]
     pub fn set_meeting_structured_output(id: String, structured_output: String) -> napi::Result<()> {
         DATABASE
             .set_meeting_structured_output(&id, &structured_output)
@@ -1310,7 +1326,8 @@ mod napi_exports {
 
     #[napi]
     pub fn export_entry_markdown(id: String) -> napi::Result<String> {
-        let entry = DATABASE.get_entry(&id).map_err(Into::<napi::Error>::into)?;
+        let store = EntryStore::new(DATABASE.clone());
+        let entry = store.get(&id).map_err(Into::<napi::Error>::into)?;
         match entry {
             Some(e) => Ok(crate::export::formatter::entry_to_markdown(&e)),
             None => Err(napi::Error::from_reason(format!("Entry not found: {id}"))),
@@ -1319,7 +1336,8 @@ mod napi_exports {
 
     #[napi]
     pub fn export_entry_json(id: String) -> napi::Result<String> {
-        let entry = DATABASE.get_entry(&id).map_err(Into::<napi::Error>::into)?;
+        let store = EntryStore::new(DATABASE.clone());
+        let entry = store.get(&id).map_err(Into::<napi::Error>::into)?;
         match entry {
             Some(e) => Ok(crate::export::formatter::entry_to_json(&e)),
             None => Err(napi::Error::from_reason(format!("Entry not found: {id}"))),
@@ -1328,7 +1346,8 @@ mod napi_exports {
 
     #[napi]
     pub fn export_entry_plain_text(id: String) -> napi::Result<String> {
-        let entry = DATABASE.get_entry(&id).map_err(Into::<napi::Error>::into)?;
+        let store = EntryStore::new(DATABASE.clone());
+        let entry = store.get(&id).map_err(Into::<napi::Error>::into)?;
         match entry {
             Some(e) => Ok(crate::export::formatter::entry_to_plain_text(&e)),
             None => Err(napi::Error::from_reason(format!("Entry not found: {id}"))),

@@ -58,6 +58,25 @@ function createWindow(): void {
 /** Domains allowed for model downloads (must match model-downloader.ts ALLOWED_DOMAINS) */
 const MODEL_DOWNLOAD_DOMAINS = ['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'huggingface.co', 'xethub.hf.co'];
 
+function setupMediaPermissions(): void {
+  // Grant microphone access to the renderer process.
+  // Required when sandbox: true — without this, getUserMedia silently fails.
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    // Allow media (microphone) for our own renderer
+    if (permission === 'media') {
+      callback(true);
+      return;
+    }
+    // Deny everything else (camera, geolocation, notifications, etc.)
+    callback(false);
+  });
+
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
+    if (permission === 'media') return true;
+    return false;
+  });
+}
+
 function blockAllNetworkRequests(): void {
   // Privacy guarantee: block ALL outbound network requests except model downloads.
   // Model downloads are the ONLY network activity, triggered explicitly by the user.
@@ -108,6 +127,7 @@ function registerGlobalHotkey(): void {
 
 app.whenReady().then(() => {
   blockAllNetworkRequests();
+  setupMediaPermissions();
   registerIpcHandlers();
   createWindow();
   createTray(() => app.quit());

@@ -20,6 +20,8 @@ pub struct MeetingSession {
     pub template_id: Option<String>,
     pub structured_output: Option<String>,
     pub detected_app: Option<String>,
+    pub raw_transcript: Option<String>,
+    pub name: Option<String>,
 }
 
 fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<MeetingSession> {
@@ -35,11 +37,13 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<MeetingSession> {
         template_id: row.get(8)?,
         structured_output: row.get(9)?,
         detected_app: row.get(10)?,
+        raw_transcript: row.get(11)?,
+        name: row.get(12)?,
     })
 }
 
 const SELECT_COLS: &str =
-    "id, started_at, ended_at, speaker_count, summary, action_items, total_duration_seconds, entry_ids, template_id, structured_output, detected_app";
+    "id, started_at, ended_at, speaker_count, summary, action_items, total_duration_seconds, entry_ids, template_id, structured_output, detected_app, raw_transcript, name";
 
 impl Database {
     pub fn create_meeting_session(&self) -> Result<MeetingSession, IronMicError> {
@@ -73,6 +77,8 @@ impl Database {
             template_id: template_id.map(String::from),
             structured_output: None,
             detected_app: detected_app.map(String::from),
+            raw_transcript: None,
+            name: None,
         })
     }
 
@@ -94,6 +100,34 @@ impl Database {
             rusqlite::params![now, speaker_count, summary, action_items, total_duration_seconds, entry_ids, id],
         )
         .map_err(|e| IronMicError::Storage(format!("Failed to end meeting session: {e}")))?;
+        Ok(())
+    }
+
+    pub fn rename_meeting_session(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<(), IronMicError> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE meeting_sessions SET name = ?1 WHERE id = ?2",
+            rusqlite::params![name, id],
+        )
+        .map_err(|e| IronMicError::Storage(format!("Failed to rename meeting: {e}")))?;
+        Ok(())
+    }
+
+    pub fn set_meeting_raw_transcript(
+        &self,
+        id: &str,
+        raw_transcript: &str,
+    ) -> Result<(), IronMicError> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE meeting_sessions SET raw_transcript = ?1 WHERE id = ?2",
+            rusqlite::params![raw_transcript, id],
+        )
+        .map_err(|e| IronMicError::Storage(format!("Failed to set raw transcript: {e}")))?;
         Ok(())
     }
 
@@ -135,6 +169,41 @@ impl Database {
         let rows = stmt
             .query_map(rusqlite::params![limit, offset], read_session)
             .map_err(|e| IronMicError::Storage(format!("Failed to list meetings: {e}")))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(
+                row.map_err(|e| IronMicError::Storage(format!("Failed to read meeting: {e}")))?,
+            );
+        }
+        Ok(results)
+    }
+
+    /// Search meeting sessions by name, summary, raw_transcript, or action_items.
+    pub fn search_meeting_sessions(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<MeetingSession>, IronMicError> {
+        let conn = self.conn();
+        let like_param = format!("%{}%", query.replace('%', "\\%"));
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM meeting_sessions
+             WHERE name LIKE ?1 ESCAPE '\\'
+                OR summary LIKE ?1 ESCAPE '\\'
+                OR raw_transcript LIKE ?1 ESCAPE '\\'
+                OR action_items LIKE ?1 ESCAPE '\\'
+                OR structured_output LIKE ?1 ESCAPE '\\'
+             ORDER BY started_at DESC
+             LIMIT ?2"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| IronMicError::Storage(format!("Failed to prepare meeting search: {e}")))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![like_param, limit], read_session)
+            .map_err(|e| IronMicError::Storage(format!("Failed to search meetings: {e}")))?;
 
         let mut results = Vec::new();
         for row in rows {

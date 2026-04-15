@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Mic, MicOff, Plus, Users, Clock, LayoutTemplate, Trash2 } from 'lucide-react';
-import { Card, Badge, Button } from './ui';
+import { Card, Badge, Button, PageHeader } from './ui';
 import { MeetingSessionCard } from './MeetingSessionCard';
 import { MeetingTemplateEditor } from './MeetingTemplateEditor';
 import { useMeetingStore } from '../stores/useMeetingStore';
@@ -8,11 +8,12 @@ import { meetingDetector, type MeetingState, type MeetingResult } from '../servi
 import type { MeetingTemplate } from '../services/tfjs/MeetingTemplateEngine';
 
 export function MeetingPage() {
-  const { templates, sessions, activeResult, loadTemplates, loadSessions, createTemplate, deleteTemplate, deleteSession, setActiveResult, detectedApp, setDetectedApp } = useMeetingStore();
+  const { templates, sessions, activeResult, loadTemplates, loadSessions, createTemplate, deleteTemplate, deleteSession, renameSession, setActiveResult, detectedApp, setDetectedApp } = useMeetingStore();
   const [meetingState, setMeetingState] = useState<MeetingState>('idle');
   const [selectedTemplate, setSelectedTemplate] = useState<MeetingTemplate | null>(null);
   const [showEditor, setShowEditor] = useState(false);
   const [durationMs, setDurationMs] = useState(0);
+  const [meetingName, setMeetingName] = useState('');
 
   useEffect(() => {
     loadTemplates();
@@ -46,8 +47,13 @@ export function MeetingPage() {
 
   const handleStart = async () => {
     try {
-      await meetingDetector.start(selectedTemplate || undefined, detectedApp || undefined);
+      const sessionId = await meetingDetector.start(selectedTemplate || undefined, detectedApp || undefined);
       setDetectedApp(null);
+      // Save the meeting name if provided
+      if (meetingName.trim() && sessionId) {
+        try { await window.ironmic.meetingRename(sessionId, meetingName.trim()); } catch { /* ok */ }
+      }
+      setMeetingName('');
     } catch (err) {
       console.error('Failed to start meeting:', err);
     }
@@ -77,10 +83,9 @@ export function MeetingPage() {
   };
 
   return (
-    <div className="max-w-lg mx-auto space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-iron-text">Meetings</h2>
-      </div>
+    <div className="h-full overflow-y-auto flex flex-col">
+      <PageHeader icon={Users} iconColor="blue-500" title="Meetings" description="Record, transcribe, and summarize your meetings" />
+      <div className="flex-1 p-6"><div className="max-w-2xl mx-auto space-y-6 pb-16">
 
       {/* Detection banner */}
       {detectedApp && meetingState === 'idle' && (
@@ -215,14 +220,23 @@ export function MeetingPage() {
             ))}
           </div>
 
-          {/* Start button */}
-          <Button
-            onClick={handleStart}
-            className="w-full"
-            icon={<Mic className="w-4 h-4" />}
-          >
-            Start Meeting
-          </Button>
+          {/* Meeting name + start */}
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={meetingName}
+              onChange={e => setMeetingName(e.target.value)}
+              placeholder="Meeting name (optional) — e.g., Sprint Review, 1-on-1 with Alex"
+              className="w-full px-3 py-2 text-sm bg-iron-surface border border-iron-border rounded-lg text-iron-text placeholder:text-iron-text-muted focus:border-iron-accent/30 focus:outline-none"
+            />
+            <Button
+              onClick={handleStart}
+              className="w-full"
+              icon={<Mic className="w-4 h-4" />}
+            >
+              Start Meeting
+            </Button>
+          </div>
         </div>
       )}
 
@@ -257,10 +271,10 @@ export function MeetingPage() {
         <div className="space-y-2">
           <p className="text-[11px] font-semibold text-iron-text-muted uppercase tracking-wider">History</p>
           {sessions.map(s => (
-            <MeetingSessionCard key={s.id} session={s} onDelete={deleteSession} />
+            <MeetingSessionCard key={s.id} session={s} onDelete={deleteSession} onRename={renameSession} />
           ))}
         </div>
       )}
-    </div>
+    </div></div></div>
   );
 }

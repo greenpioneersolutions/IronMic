@@ -20,17 +20,18 @@
 
 ---
 
-IronMic captures your voice, transcribes it with Whisper, optionally polishes it with a local LLM, and copies the result to your clipboard or saves it as a rich-text note. A built-in TTS engine can read your dictations back to you. Everything runs entirely on your machine — no audio or text ever leaves the device.
+IronMic captures your voice, transcribes it with Whisper, and copies the raw transcript to your clipboard or routes it to the active page — dictate, search, listen, notes, or timeline. Optionally polish text with a local LLM on-demand, or hear it read back with a built-in TTS engine. Everything runs entirely on your machine — no audio or text ever leaves the device.
 
 ---
 
 ## Features
 
 ### Core Dictation
-- **Voice-to-clipboard** — Press a global hotkey, speak, press again. Polished text lands in your clipboard, ready to paste anywhere.
-- **Voice-to-note** — Dictate directly into a rich text editor (TipTap/ProseMirror) with formatting, headings, lists, code blocks, and more.
+- **Voice-to-clipboard** — Press a global hotkey, speak, press again. Raw transcript lands in your clipboard instantly, ready to paste anywhere.
+- **Page-aware recording** — Voice input routes to the active page: dictate page inserts into the editor, search page fills the search bar, listen page queues for TTS playback, notes page appends to the active note.
+- **Progressive feedback** — See your transcript appear in the timeline immediately after recording stops, with a live progress indicator. No more waiting for the full pipeline to complete.
 - **Whisper large-v3-turbo** — State-of-the-art local speech recognition with GPU acceleration (Metal on macOS).
-- **LLM text cleanup** — A local Mistral 7B model removes filler words, fixes grammar, and preserves your meaning. Toggleable per-entry.
+- **On-demand LLM text cleanup** — Click "Polish now" on any timeline entry to clean up text with a local Mistral 7B model. Removes filler words, fixes grammar, preserves your meaning. Raw text is always shown first — you control when cleanup runs.
 - **Custom dictionary** — Add domain-specific terms, names, and jargon to improve transcription accuracy.
 
 ### Text-to-Speech Read-Back
@@ -62,8 +63,9 @@ IronMic includes 5 TensorFlow.js-powered ML features that learn from your usage 
 > All ML models are under 50MB total. All training data stays in SQLite on your machine. Toggle each feature independently in **Settings > Voice AI**.
 
 ### Organization & Search
-- **Timeline view** — Scrollable card feed of all dictations, newest first.
-- **Full-text search** — Instant search across all transcriptions (SQLite FTS5).
+- **Unified search** — Search across all content types from one place: dictation entries (FTS5), meeting notes, AI chat conversations, and written notes. Filter by category, see highlighted matches.
+- **Timeline view** — Scrollable card feed of all dictations, newest first. Entries show raw text by default with on-demand polishing.
+- **Full-text search** — Instant search across all transcriptions (SQLite FTS5) and meeting sessions (name, summary, transcript, action items).
 - **Semantic search** — AI-powered meaning-based search across all content (TF.js Universal Sentence Encoder).
 - **Tags** — Categorize entries with custom tags.
 - **Pin & archive** — Pin important entries to the top, archive old ones.

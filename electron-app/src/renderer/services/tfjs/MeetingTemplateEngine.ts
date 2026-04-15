@@ -62,9 +62,18 @@ export async function generateStructuredNotes(
   let rawOutput: string;
 
   if (ironmic?.polishText && transcript.length > 20) {
-    rawOutput = await ironmic.polishText(prompt);
+    try {
+      const result = await ironmic.polishText(prompt);
+      // Detect stub: if result contains the prompt preamble, LLM is a passthrough
+      if (result && !result.includes('{transcript}') && !result.includes('You are a meeting notes assistant')) {
+        rawOutput = result;
+      } else {
+        rawOutput = transcript;
+      }
+    } catch {
+      rawOutput = transcript;
+    }
   } else {
-    // No LLM available — return the raw transcript organized by template
     rawOutput = transcript;
   }
 

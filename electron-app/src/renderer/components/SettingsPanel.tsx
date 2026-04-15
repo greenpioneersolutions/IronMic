@@ -15,21 +15,38 @@ import {
   Mic, Route, Users, Search, Bell, Workflow, Sliders,
 } from 'lucide-react';
 
-type SettingsTab = 'general' | 'input' | 'speech' | 'ai' | 'models' | 'data' | 'security' | 'voice-ai';
+type SettingsTab = 'general' | 'input' | 'speech' | 'ai' | 'models' | 'data' | 'security' | 'voice-ai' | 'input-voice' | 'models-speech' | 'data-security';
 
 const TABS: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
   { id: 'general', label: 'General', icon: Settings },
-  { id: 'input', label: 'Input', icon: Mic },
-  { id: 'speech', label: 'Speech', icon: Volume2 },
-  { id: 'ai', label: 'AI Assist', icon: Sparkles },
-  { id: 'voice-ai', label: 'Voice AI', icon: Brain },
-  { id: 'models', label: 'Models', icon: Cpu },
-  { id: 'data', label: 'Data', icon: Database },
-  { id: 'security', label: 'Security', icon: Shield },
+  { id: 'input-voice', label: 'Input & Voice', icon: Mic },
+  { id: 'models-speech', label: 'Models', icon: Cpu },
+  { id: 'ai', label: 'AI Assistant', icon: Sparkles },
+  { id: 'data-security', label: 'Security', icon: Shield },
 ];
 
 export function SettingsPanel() {
   const [tab, setTab] = useState<SettingsTab>('general');
+
+  // Listen for external tab navigation (e.g. from toast "Check Mic Settings" button)
+  // Map old tab names to new consolidated tabs for backward compat
+  useEffect(() => {
+    const tabRedirects: Record<string, SettingsTab> = {
+      input: 'input-voice',
+      'voice-ai': 'input-voice',
+      speech: 'models-speech',
+      models: 'models-speech',
+      data: 'data-security',
+      security: 'data-security',
+    };
+    const handler = (e: Event) => {
+      const target = (e as CustomEvent).detail as string;
+      const resolved = tabRedirects[target] || target;
+      if (resolved) setTab(resolved as SettingsTab);
+    };
+    window.addEventListener('ironmic:settings-tab', handler);
+    return () => window.removeEventListener('ironmic:settings-tab', handler);
+  }, []);
 
   return (
     <div className="flex h-full">
@@ -58,15 +75,12 @@ export function SettingsPanel() {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        <div className="p-6 max-w-lg mx-auto space-y-6 pb-16">
+        <div className="p-6 max-w-2xl mx-auto space-y-6 pb-16">
           {tab === 'general' && <GeneralSettings />}
-          {tab === 'input' && <InputSettings />}
-          {tab === 'speech' && <SpeechSettings />}
+          {tab === 'input-voice' && <InputVoiceSettings />}
+          {tab === 'models-speech' && <ModelsSpeechSettings />}
           {tab === 'ai' && <AIAssistSettings />}
-          {tab === 'models' && <ModelManager />}
-          {tab === 'voice-ai' && <VoiceAISettings />}
-          {tab === 'data' && <DataSettings />}
-          {tab === 'security' && <SecuritySettings />}
+          {tab === 'data-security' && <DataSecuritySettings />}
         </div>
       </div>
     </div>
@@ -454,7 +468,7 @@ function AIAssistSettings() {
                 ) : (
                   <>
                     <p>
-                      AI Assist uses your own CLI tools — <strong className="text-iron-text">GitHub Copilot CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">gh copilot</code>) or <strong className="text-iron-text">Claude Code CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">claude</code>).
+                      AI Assist uses your own CLI tools — <strong className="text-iron-text">GitHub Copilot CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">copilot</code> or <code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">gh copilot</code>) or <strong className="text-iron-text">Claude Code CLI</strong> (<code className="text-[10px] bg-iron-surface-active px-1 py-0.5 rounded">claude</code>).
                     </p>
                     <p className="mt-1.5">
                       Your credentials stay on your machine. IronMic never sees or stores your API keys — it calls the CLI directly.
@@ -646,14 +660,14 @@ function SpeechSettings() {
             <p className="text-[10px] font-semibold text-iron-text-muted uppercase tracking-wider mb-1">{lang}</p>
             <div className="grid grid-cols-2 gap-1.5">
               {(langVoices as any[]).map((v: any) => (
-                <button key={v.id} onClick={() => handleVoiceChange(v.id)} className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs transition-all ${
+                <div key={v.id} onClick={() => handleVoiceChange(v.id)} className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs transition-all cursor-pointer ${
                   voice === v.id ? 'bg-iron-accent/10 border border-iron-accent/20 text-iron-accent-light' : 'bg-iron-surface border border-iron-border hover:border-iron-border-hover text-iron-text-secondary'
                 }`}>
                   <span>{v.name}</span>
                   <button onClick={(e) => { e.stopPropagation(); previewVoice(v.id); }} className="p-0.5 rounded hover:bg-iron-surface-hover" title="Preview voice">
                     {previewPlaying === v.id ? <div className="w-3 h-3 border border-iron-accent border-t-transparent rounded-full animate-spin" /> : <Volume2 className="w-3 h-3" />}
                   </button>
-                </button>
+                </div>
               ))}
             </div>
           </div>
@@ -927,7 +941,7 @@ function SecuritySettings() {
 // Voice AI (ML Features)
 // ═══════════════════════════════════════════
 
-function VoiceAISettings() {
+function VoiceAISettings({ compactMode }: { compactMode?: boolean } = {}) {
   const { getSetting, setSetting } = useSettingsStore();
   const [vadEnabled, setVadEnabled] = useState(true);
   const [vadSensitivity, setVadSensitivity] = useState(0.5);
@@ -942,6 +956,7 @@ function VoiceAISettings() {
   const [workflowConfidence, setWorkflowConfidence] = useState(0.7);
   const [semanticSearchEnabled, setSemanticSearchEnabled] = useState(false);
   const [meetingAutoDetect, setMeetingAutoDetect] = useState(false);
+  const [meetingSummaryPrompt, setMeetingSummaryPrompt] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -963,6 +978,7 @@ function VoiceAISettings() {
       setWorkflowConfidence(parseFloat(await val('ml_workflows_confidence', '0.7')));
       setSemanticSearchEnabled((await val('ml_semantic_search_enabled', 'false')) === 'true');
       setMeetingAutoDetect((await val('meeting_auto_detect_enabled', 'false')) === 'true');
+      setMeetingSummaryPrompt(await val('meeting_summary_prompt', ''));
     })();
   }, []);
 
@@ -979,13 +995,15 @@ function VoiceAISettings() {
 
   return (
     <>
-      <SectionHeader icon={Brain} title="Voice AI" description="On-device machine learning features" />
+      {!compactMode && <SectionHeader icon={Brain} title="Voice AI" description="On-device machine learning features" />}
 
       <Card>
         <div className="p-4 space-y-5">
-          <div className="text-xs text-iron-text-muted mb-3">
-            All ML processing runs entirely on your device. No data leaves this machine.
-          </div>
+          {!compactMode && (
+            <div className="text-xs text-iron-text-muted mb-3">
+              All ML processing runs entirely on your device. No data leaves this machine.
+            </div>
+          )}
 
           {/* VAD */}
           <SettingRow
@@ -1063,6 +1081,7 @@ function VoiceAISettings() {
             </div>
           )}
 
+          {!compactMode && (<>
           <div className="border-t border-iron-border" />
 
           {/* Voice Routing */}
@@ -1101,6 +1120,30 @@ function VoiceAISettings() {
               />
             }
           />
+
+          {/* Meeting summary prompt */}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-iron-text">Meeting Summary Prompt</label>
+            <p className="text-xs text-iron-text-muted">
+              Customize the LLM prompt used to summarize meetings. The transcript is appended automatically. Leave blank for the default.
+            </p>
+            <textarea
+              value={meetingSummaryPrompt}
+              onChange={(e) => setMeetingSummaryPrompt(e.target.value)}
+              onBlur={() => update('meeting_summary_prompt', meetingSummaryPrompt)}
+              placeholder="Summarize this meeting transcript. List key decisions and action items."
+              rows={3}
+              className="w-full px-3 py-2 text-xs bg-iron-surface border border-iron-border rounded-lg text-iron-text placeholder:text-iron-text-muted focus:border-iron-accent/30 focus:outline-none resize-y"
+            />
+            {meetingSummaryPrompt && (
+              <button
+                onClick={() => { setMeetingSummaryPrompt(''); update('meeting_summary_prompt', ''); }}
+                className="text-[10px] text-iron-accent-light hover:underline"
+              >
+                Reset to default
+              </button>
+            )}
+          </div>
 
           <div className="border-t border-iron-border" />
 
@@ -1189,10 +1232,11 @@ function VoiceAISettings() {
               />
             }
           />
+          </>)}
         </div>
       </Card>
 
-      {/* Data Management */}
+      {!compactMode && (
       <Card>
         <div className="p-4 space-y-3">
           <h3 className="text-sm font-medium text-iron-text">ML Data Management</h3>
@@ -1208,6 +1252,7 @@ function VoiceAISettings() {
           </button>
         </div>
       </Card>
+      )}
     </>
   );
 }
@@ -1277,5 +1322,61 @@ function PostureItem({ icon: Icon, label, detail, status }: {
         <p className="text-[11px] text-iron-text-muted mt-0.5">{detail}</p>
       </div>
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// Merged tabs (consolidation wrappers)
+// ═══════════════════════════════════════════
+
+/** Input & Voice: Mic hardware (InputSettings) + Voice AI features with progressive disclosure */
+function InputVoiceSettings() {
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  return (
+    <>
+      {/* Mic hardware — from InputSettings component */}
+      <InputSettings />
+
+      {/* Voice Detection — key VAD/turn settings shown inline */}
+      <div className="border-t border-iron-border pt-6 mt-6">
+        <SectionHeader icon={Brain} title="Voice Intelligence" description="Voice activity detection, turn detection, and ML features" />
+
+        {/* Show core voice settings inline, collapse the rest */}
+        <VoiceAISettings compactMode={!showAdvanced} />
+
+        <button
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          className="mt-4 text-xs font-medium text-iron-accent-light hover:underline"
+        >
+          {showAdvanced ? 'Hide advanced ML features' : 'Show advanced ML features'}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** Models & Speech: All model downloads + TTS voice/speed settings */
+function ModelsSpeechSettings() {
+  return (
+    <>
+      <ModelManager />
+      <div className="border-t border-iron-border pt-6 mt-6">
+        <SectionHeader icon={Volume2} title="Text-to-Speech" description="Voice selection, speed, and TTS model management" />
+        <SpeechSettings />
+      </div>
+    </>
+  );
+}
+
+/** Data & Security: Data management + security posture + privacy settings */
+function DataSecuritySettings() {
+  return (
+    <>
+      <DataSettings />
+      <div className="border-t border-iron-border pt-6 mt-6">
+        <SecuritySettings />
+      </div>
+    </>
   );
 }

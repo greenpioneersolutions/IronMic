@@ -39,8 +39,10 @@ const ALLOWED_SETTING_KEYS = new Set([
   'ml_semantic_search_enabled',
   // Network / proxy (v1.1.8)
   'proxy_url', 'proxy_enabled',
-  // Meeting templates (v1.3.0)
-  'meeting_auto_detect_enabled', 'meeting_default_template',
+  // Audio input (v1.4.0)
+  'input_device_id', 'input_device_name',
+  // Meeting settings (v1.3.0+)
+  'meeting_auto_detect_enabled', 'meeting_default_template', 'meeting_summary_prompt',
 ]);
 
 function assertString(val: unknown, name: string): asserts val is string {
@@ -69,9 +71,31 @@ export function registerIpcHandlers(): void {
     const buf = Buffer.isBuffer(audioBuffer) ? audioBuffer : Buffer.from(audioBuffer);
     return native.transcribe(buf);
   });
-  ipcMain.handle(IPC_CHANNELS.POLISH_TEXT, (_e, rawText: string) =>
-    native.polishText(rawText)
-  );
+  ipcMain.handle(IPC_CHANNELS.POLISH_TEXT, async (_e, rawText: string) => {
+    // Route through LLM subprocess if available (actual inference)
+    if (llmSubprocess.isAvailable()) {
+      try {
+        const path = require('path');
+        const fs = require('fs');
+        const modelFilename = MODEL_FILES['llm'] || 'mistral-7b-instruct-q4_k_m.gguf';
+        // Try user data dir first, then dev-time path
+        const candidates = [
+          process.env.IRONMIC_MODELS_DIR ? path.join(process.env.IRONMIC_MODELS_DIR, modelFilename) : '',
+          path.join(__dirname, '..', '..', '..', 'rust-core', 'models', modelFilename),
+        ].filter(Boolean);
+        const modelPath = candidates.find((p: string) => fs.existsSync(p));
+        if (modelPath) {
+          console.log(`[ipc] polishText via LLM subprocess (model: ${modelPath})`);
+          return await llmSubprocess.polishText(rawText, modelPath);
+        }
+        console.warn('[ipc] LLM model file not found, falling back to stub');
+      } catch (err: any) {
+        console.warn('[ipc] LLM subprocess polish failed:', err.message);
+      }
+    }
+    // Fallback: N-API stub (returns text unchanged)
+    return native.polishText(rawText);
+  });
 
   // Entries
   ipcMain.handle(IPC_CHANNELS.CREATE_ENTRY, (_e, entry) => native.createEntry(entry));
@@ -396,6 +420,7 @@ If the text is too short or unclear, output: ["General"]`;
   ipcMain.handle(IPC_CHANNELS.MEETING_GET, (_e, id: string) => native.addon.getMeetingSession(id));
   ipcMain.handle(IPC_CHANNELS.MEETING_LIST, (_e, limit: number, offset: number) => native.addon.listMeetingSessions(limit, offset));
   ipcMain.handle(IPC_CHANNELS.MEETING_DELETE, (_e, id: string) => native.addon.deleteMeetingSession(id));
+  ipcMain.handle(IPC_CHANNELS.MEETING_SEARCH, (_e, query: string, limit: number) => native._call('searchMeetingSessions', query, limit) ?? '[]');
 
   // ── TF.js Infrastructure ──
 
@@ -472,6 +497,12 @@ If the text is too short or unclear, output: ["General"]`;
   });
   ipcMain.handle(IPC_CHANNELS.MEETING_SET_STRUCTURED_OUTPUT, (_event, id: string, structuredOutput: string) => {
     return native.setMeetingStructuredOutput(id, structuredOutput);
+  });
+  ipcMain.handle(IPC_CHANNELS.MEETING_SET_RAW_TRANSCRIPT, (_event, id: string, rawTranscript: string) => {
+    return native.setMeetingRawTranscript(id, rawTranscript);
+  });
+  ipcMain.handle(IPC_CHANNELS.MEETING_RENAME, (_event, id: string, name: string) => {
+    return native.renameMeetingSession(id, name);
   });
 
   // ── Export / Sharing ──

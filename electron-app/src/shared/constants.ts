@@ -131,6 +131,9 @@ export const IPC_CHANNELS = {
   MEETING_DELETE: 'ironmic:meeting-delete',
   MEETING_CREATE_WITH_TEMPLATE: 'ironmic:meeting-create-with-template',
   MEETING_SET_STRUCTURED_OUTPUT: 'ironmic:meeting-set-structured-output',
+  MEETING_SET_RAW_TRANSCRIPT: 'ironmic:meeting-set-raw-transcript',
+  MEETING_RENAME: 'ironmic:meeting-rename',
+  MEETING_SEARCH: 'ironmic:meeting-search',
 
   // Meeting Templates
   TEMPLATE_CREATE: 'ironmic:template-create',

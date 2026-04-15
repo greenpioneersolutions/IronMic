@@ -1,11 +1,21 @@
 import { create } from 'zustand';
 import type { Entry, ListOptions } from '../types';
 
+export type PendingStage = 'transcribing' | 'complete';
+
+export interface PendingEntry {
+  stage: PendingStage;
+  rawTranscript?: string;
+  entryId?: string;
+  startedAt: number; // timestamp for display
+}
+
 interface EntryStore {
   entries: Entry[];
   loading: boolean;
   hasMore: boolean;
   selectedTag: string | null;
+  pendingEntry: PendingEntry | null;
 
   loadEntries: (opts?: Partial<ListOptions>) => Promise<void>;
   loadMore: () => Promise<void>;
@@ -16,6 +26,8 @@ interface EntryStore {
   polishEntry: (id: string) => Promise<void>;
   updateEntryTags: (id: string, tags: string[]) => Promise<void>;
   setSelectedTag: (tag: string | null) => void;
+  setPendingEntry: (entry: PendingEntry | null) => void;
+  updatePendingEntry: (updates: Partial<PendingEntry>) => void;
 }
 
 const PAGE_SIZE = 20;
@@ -25,6 +37,7 @@ export const useEntryStore = create<EntryStore>((set, get) => ({
   loading: false,
   hasMore: true,
   selectedTag: null,
+  pendingEntry: null,
 
   loadEntries: async (opts = {}) => {
     set({ loading: true });
@@ -119,4 +132,12 @@ export const useEntryStore = create<EntryStore>((set, get) => ({
   },
 
   setSelectedTag: (tag) => set({ selectedTag: tag }),
+
+  setPendingEntry: (entry) => set({ pendingEntry: entry }),
+
+  updatePendingEntry: (updates) => {
+    const current = get().pendingEntry;
+    if (!current) return;
+    set({ pendingEntry: { ...current, ...updates } });
+  },
 }));

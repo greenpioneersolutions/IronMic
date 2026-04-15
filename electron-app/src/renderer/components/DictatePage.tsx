@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useRecordingStore } from '../stores/useRecordingStore';
 import { useTtsStore } from '../stores/useTtsStore';
-import { Card } from './ui';
+import { Card, PageHeader } from './ui';
 
 const STORAGE_KEY = 'ironmic-dictate-draft';
 
@@ -150,77 +150,58 @@ export function DictatePage() {
 
   return (
     <div className="h-full flex flex-col bg-iron-bg">
-      {/* Header */}
-      <div className="px-5 pt-4 pb-3 border-b border-iron-border">
-        <div className="flex items-center justify-between max-w-4xl mx-auto">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-iron-accent/10 flex items-center justify-center">
-              <Mic className="w-4.5 h-4.5 text-iron-accent-light" />
-            </div>
-            <div>
-              <h2 className="text-base font-semibold text-iron-text">Dictate</h2>
-              <p className="text-[10px] text-iron-text-muted">Voice-to-text rich editor</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {/* Record button */}
+      <PageHeader icon={Mic} title="Dictate" description="Voice-to-text rich editor" actions={
+        <>
+          <button
+            onClick={() => handleHotkeyPress('dictate')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-medium transition-all ${
+              recordingState === 'recording'
+                ? 'bg-iron-danger text-white shadow-glow-danger animate-pulse-recording'
+                : recordingState === 'processing'
+                ? 'bg-iron-warning text-white shadow-glow'
+                : 'bg-gradient-accent text-white hover:shadow-glow'
+            }`}
+          >
+            <Mic className="w-3.5 h-3.5" />
+            {recordingState === 'recording' ? 'Stop' : recordingState === 'processing' ? 'Processing...' : 'Dictate'}
+          </button>
+          <button
+            onClick={ttsState === 'playing' || ttsState === 'paused' ? () => ttsToggle() : handleReadBack}
+            disabled={ttsState === 'synthesizing' || (!editor?.getText().trim() && ttsState === 'idle')}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all ${
+              ttsState === 'playing'
+                ? 'bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25'
+                : ttsState === 'paused'
+                ? 'bg-yellow-500/15 text-yellow-400 hover:bg-yellow-500/25'
+                : ttsState === 'synthesizing'
+                ? 'text-iron-text-muted opacity-50 cursor-wait'
+                : 'text-iron-text-muted hover:text-iron-text-secondary hover:bg-iron-surface-hover'
+            } disabled:opacity-30 disabled:cursor-not-allowed`}
+            title={ttsState === 'playing' ? 'Pause read-back' : ttsState === 'paused' ? 'Resume read-back' : 'Read back aloud'}
+          >
+            {ttsState === 'playing' ? <Pause className="w-3.5 h-3.5" /> :
+             ttsState === 'paused' ? <Play className="w-3.5 h-3.5" /> :
+             <Volume2 className="w-3.5 h-3.5" />}
+            {ttsState === 'playing' ? 'Pause' : ttsState === 'paused' ? 'Resume' : ttsState === 'synthesizing' ? 'Loading...' : 'Read Back'}
+          </button>
+          {(ttsState === 'playing' || ttsState === 'paused') && (
             <button
-              onClick={() => handleHotkeyPress('dictate')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-medium transition-all ${
-                recordingState === 'recording'
-                  ? 'bg-iron-danger text-white shadow-glow-danger animate-pulse-recording'
-                  : recordingState === 'processing'
-                  ? 'bg-iron-warning text-white shadow-glow'
-                  : 'bg-gradient-accent text-white hover:shadow-glow'
-              }`}
+              onClick={handleReadBack}
+              className="flex items-center gap-1.5 px-2 py-2 rounded-xl text-xs font-medium text-iron-text-muted hover:text-red-400 hover:bg-red-500/10 transition-all"
+              title="Stop read-back"
             >
-              <Mic className="w-3.5 h-3.5" />
-              {recordingState === 'recording' ? 'Stop' : recordingState === 'processing' ? 'Processing...' : 'Dictate'}
+              <Square className="w-3 h-3" />
             </button>
-
-            {/* Read back button */}
-            <button
-              onClick={ttsState === 'playing' || ttsState === 'paused' ? () => ttsToggle() : handleReadBack}
-              disabled={ttsState === 'synthesizing' || (!editor?.getText().trim() && ttsState === 'idle')}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all ${
-                ttsState === 'playing'
-                  ? 'bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25'
-                  : ttsState === 'paused'
-                  ? 'bg-yellow-500/15 text-yellow-400 hover:bg-yellow-500/25'
-                  : ttsState === 'synthesizing'
-                  ? 'text-iron-text-muted opacity-50 cursor-wait'
-                  : 'text-iron-text-muted hover:text-iron-text-secondary hover:bg-iron-surface-hover'
-              } disabled:opacity-30 disabled:cursor-not-allowed`}
-              title={ttsState === 'playing' ? 'Pause read-back' : ttsState === 'paused' ? 'Resume read-back' : 'Read back aloud'}
-            >
-              {ttsState === 'playing' ? <Pause className="w-3.5 h-3.5" /> :
-               ttsState === 'paused' ? <Play className="w-3.5 h-3.5" /> :
-               <Volume2 className="w-3.5 h-3.5" />}
-              {ttsState === 'playing' ? 'Pause' : ttsState === 'paused' ? 'Resume' : ttsState === 'synthesizing' ? 'Loading...' : 'Read Back'}
-            </button>
-
-            {/* Stop button (only when playing/paused) */}
-            {(ttsState === 'playing' || ttsState === 'paused') && (
-              <button
-                onClick={handleReadBack}
-                className="flex items-center gap-1.5 px-2 py-2 rounded-xl text-xs font-medium text-iron-text-muted hover:text-red-400 hover:bg-red-500/10 transition-all"
-                title="Stop read-back"
-              >
-                <Square className="w-3 h-3" />
-              </button>
-            )}
-
-            <button
-              onClick={handleNewDocument}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-iron-text-muted hover:text-iron-text-secondary hover:bg-iron-surface-hover transition-all"
-            >
-              <FileText className="w-3.5 h-3.5" />
-              New
-            </button>
-          </div>
-        </div>
-      </div>
+          )}
+          <button
+            onClick={handleNewDocument}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-iron-text-muted hover:text-iron-text-secondary hover:bg-iron-surface-hover transition-all"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            New
+          </button>
+        </>
+      } />
 
       {/* Info tip */}
       <div className="px-5 py-2 border-b border-iron-border bg-iron-surface/30">

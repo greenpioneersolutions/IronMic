@@ -104,6 +104,10 @@ impl Database {
             )
             .unwrap_or(0);
 
+        // Patches that must run regardless of version (column additions missed by earlier migrations)
+        let _ = conn.execute_batch("ALTER TABLE meeting_sessions ADD COLUMN raw_transcript TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE meeting_sessions ADD COLUMN name TEXT;");
+
         if current_version >= SCHEMA_VERSION {
             info!(version = current_version, "Database schema is up to date");
             return Ok(());
@@ -439,10 +443,11 @@ impl Database {
                 updated_at TEXT NOT NULL
             );
 
-            -- Extend meeting_sessions with template support
+            -- Extend meeting_sessions with template support and raw transcript
             ALTER TABLE meeting_sessions ADD COLUMN template_id TEXT;
             ALTER TABLE meeting_sessions ADD COLUMN structured_output TEXT;
             ALTER TABLE meeting_sessions ADD COLUMN detected_app TEXT;
+            ALTER TABLE meeting_sessions ADD COLUMN raw_transcript TEXT;
 
             -- New settings
             INSERT OR IGNORE INTO settings (key, value) VALUES ('meeting_auto_detect_enabled', 'false');

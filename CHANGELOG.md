@@ -2,10 +2,58 @@
 
 All notable changes to IronMic will be documented in this file.
 
+## [1.5.0] - 2026-04-15
+
+### Added
+
+#### Unified Search
+- **Cross-content search** — The Search page now searches across all content types: dictation entries (FTS5), meeting sessions, AI chat conversations, and notes. Previously only searched dictation entries loaded in memory.
+- **Server-side entry search** — Entry search now uses the SQLite FTS5 full-text index directly instead of client-side filtering, supporting prefix matching and returning up to 30 results.
+- **Meeting session search** — New Rust function `search_meeting_sessions()` searches across meeting name, summary, raw transcript, action items, and structured output. Wired through NAPI, IPC, and preload.
+- **Categorized results with filter tabs** — Results are grouped by type (Dictation, Meeting, AI Chat, Note) with filter tabs showing per-category counts. Tabs with zero results are hidden.
+- **Search result highlighting** — Matching text is highlighted in preview snippets with context shown around the match.
+- **Search loading indicator** — Spinner shown while server-side searches are in flight.
+- **Result metadata** — Meeting results show speaker count and duration. AI chat results show message count.
+
+#### Page-Aware Voice Recording
+- **Voice input routes to the active page** — Recording now tracks which page initiated it and routes the transcribed text back to that page, even if you navigate away during processing.
+  - **Dictate page** — Raw transcript inserts directly into the TipTap editor.
+  - **Search page** — Transcribed speech fills the search bar and triggers a search.
+  - **Listen page** — Creates a new listen entry and auto-plays it with TTS.
+  - **Notes page** — Appends dictated text to the active note, or creates a new note if none is open.
+  - **Timeline / Home** — Text goes to clipboard and creates a new timeline entry.
+  - **AI Chat** — Text routes to the active AI conversation.
+
+#### Progressive Entry Display
+- **Instant feedback on recording stop** — A pending entry card appears at the top of the timeline immediately when you stop recording, showing a "Transcribing speech..." spinner. The raw transcript appears as soon as Whisper finishes, followed by a "Copied to clipboard" confirmation.
+- **No more waiting** — Previously, the entire pipeline (transcribe + LLM polish + clipboard + save) had to complete before anything appeared. Now each step is visible as it happens.
+
+### Changed
+
+#### Recording Pipeline
+- **LLM text cleanup is now on-demand only** — The recording pipeline no longer auto-runs LLM polish. When you stop recording, you get your raw transcript immediately — copied to clipboard and saved to the timeline. This makes the dictation flow significantly faster.
+- **"Polish now" button on timeline entries** — To clean up text, click "Polish now" on any entry card in the timeline. This triggers the LLM on that specific entry. You can then toggle between raw and polished views.
+- **Timeline defaults to raw text** — Entry cards now display the raw transcript by default instead of auto-selecting the polished version.
+- **Clipboard gets raw text immediately** — No more waiting for LLM processing before text lands in your clipboard.
+
+#### ShareMenu
+- **Dropdown no longer clipped** — The share/export dropdown now renders via a React Portal at the document body level, fixing the issue where it was hidden behind entry cards due to `overflow-hidden` on parent containers. Also closes automatically on scroll.
+
+---
+
 ## [1.3.3] - 2026-04-15
 
 ### Fixed
 - **TTS Kokoro Download button persists after import** — The Kokoro TTS card checked `isTtsModelReady()` which requires both the model file AND voice files. After importing just the `.onnx` model, the card still showed "Download". Now tracks model file presence separately — shows "Imported" badge when the model exists but voices haven't been downloaded yet, and "Ready" when both are present.
+
+---
+
+## [1.4.1] - 2026-04-15
+
+### Fixed
+- **Copilot CLI detection** — Now detects standalone `copilot` CLI (not just `gh copilot`). Checks for `copilot` binary first, then falls back to `gh`. Adapts args and auth checks based on which variant is installed.
+- **Copilot auth refresh flashing** — Binary path cache is cleared on auth refresh so re-detection runs fresh instead of returning stale state.
+- **Info card text** — Updated to show both `copilot` and `gh copilot` as valid CLI options.
 
 ---
 

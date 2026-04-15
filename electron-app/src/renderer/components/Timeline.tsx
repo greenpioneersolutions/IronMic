@@ -3,8 +3,10 @@ import { useEntryStore } from '../stores/useEntryStore';
 import { useSearch } from '../hooks/useSearch';
 import { EntryCard } from './EntryCard';
 import { AiSessionCard } from './AiSessionCard';
+import { PendingEntryCard } from './PendingEntryCard';
 import { SearchBar } from './SearchBar';
-import { Loader2 } from 'lucide-react';
+import { PageHeader } from './ui';
+import { List, Loader2 } from 'lucide-react';
 import type { Entry } from '../types';
 
 /** Parse sourceApp to extract session ID if it's an AI entry */
@@ -32,7 +34,7 @@ type TimelineRow = TimelineItem | SessionGroup;
 
 export function Timeline() {
   const {
-    entries, loading, hasMore, selectedTag,
+    entries, loading, hasMore, selectedTag, pendingEntry,
     loadEntries, loadMore, deleteEntry, pinEntry,
     archiveEntry, polishEntry, setSelectedTag,
   } = useEntryStore();
@@ -94,6 +96,7 @@ export function Timeline() {
 
   return (
     <div className="flex flex-col h-full">
+      <PageHeader icon={List} title="Timeline" description="Your dictation history" />
       <div className="p-4 pb-2">
         <SearchBar query={query} onQueryChange={setQuery} />
         {selectedTag && (
@@ -111,7 +114,10 @@ export function Timeline() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
-        {rows.length === 0 && !loading && (
+        {/* Show pending entry at the top while processing */}
+        {pendingEntry && <PendingEntryCard pending={pendingEntry} />}
+
+        {rows.length === 0 && !loading && !pendingEntry && (
           <div className="text-center text-iron-text-muted py-16">
             <p className="text-sm">
               {debouncedQuery

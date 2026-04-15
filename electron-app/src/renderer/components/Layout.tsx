@@ -34,20 +34,35 @@ interface NavItem {
   id: Page;
   label: string;
   icon: typeof Mic;
-  section: 'core' | 'tools' | 'system';
+  section: 'workspace' | 'discover';
 }
 
+/** Page metadata for top bar title and icons */
+const PAGE_META: Record<Page, { label: string; icon: typeof Mic }> = {
+  home: { label: 'Home', icon: Home },
+  main: { label: 'Timeline', icon: List },
+  ai: { label: 'AI Assistant', icon: Sparkles },
+  dictate: { label: 'Dictate', icon: PenTool },
+  listen: { label: 'Listen', icon: Volume2 },
+  notes: { label: 'Notes', icon: StickyNote },
+  search: { label: 'Search', icon: Search },
+  analytics: { label: 'Analytics', icon: BarChart3 },
+  meetings: { label: 'Meetings', icon: Users },
+  settings: { label: 'Settings', icon: Settings },
+};
+
 const NAV_ITEMS: NavItem[] = [
-  { id: 'home', label: 'Home', icon: Home, section: 'core' },
-  { id: 'main', label: 'Timeline', icon: List, section: 'core' },
-  { id: 'ai', label: 'AI Assistant', icon: Sparkles, section: 'core' },
-  { id: 'dictate', label: 'Dictate', icon: PenTool, section: 'tools' },
-  { id: 'listen', label: 'Listen', icon: Volume2, section: 'tools' },
-  { id: 'notes', label: 'Notes', icon: StickyNote, section: 'tools' },
-  { id: 'search', label: 'Search', icon: Search, section: 'tools' },
-  { id: 'analytics', label: 'Analytics', icon: BarChart3, section: 'tools' },
-  { id: 'meetings', label: 'Meetings', icon: Users, section: 'tools' },
-  { id: 'settings', label: 'Settings', icon: Settings, section: 'system' },
+  // Workspace: primary creation tools
+  { id: 'home', label: 'Home', icon: Home, section: 'workspace' },
+  { id: 'dictate', label: 'Dictate', icon: PenTool, section: 'workspace' },
+  { id: 'main', label: 'Timeline', icon: List, section: 'workspace' },
+  { id: 'notes', label: 'Notes', icon: StickyNote, section: 'workspace' },
+  { id: 'meetings', label: 'Meetings', icon: Users, section: 'workspace' },
+  // Discover: consumption & exploration
+  { id: 'search', label: 'Search', icon: Search, section: 'discover' },
+  { id: 'ai', label: 'AI Assistant', icon: Sparkles, section: 'discover' },
+  { id: 'listen', label: 'Listen', icon: Volume2, section: 'discover' },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3, section: 'discover' },
 ];
 
 export function Layout() {
@@ -71,10 +86,20 @@ export function Layout() {
   }, []);
 
   const handleRecord = useCallback(() => {
-    const source = pageRef.current === 'ai' ? 'ai-chat'
-      : pageRef.current === 'dictate' ? 'dictate'
-      : undefined;
-    handleHotkeyPress(source);
+    // Track which page started the recording so results route back there
+    const pageSourceMap: Record<Page, string | undefined> = {
+      home: undefined,
+      main: 'timeline',
+      ai: 'ai-chat',
+      dictate: 'dictate',
+      listen: 'listen',
+      notes: 'notes',
+      search: 'search',
+      analytics: undefined,
+      meetings: undefined,
+      settings: undefined,
+    };
+    handleHotkeyPress(pageSourceMap[pageRef.current]);
   }, [handleHotkeyPress]);
 
   useEffect(() => { loadSettings(); }, [loadSettings]);
@@ -157,29 +182,55 @@ export function Layout() {
         },
       });
     };
-    const emptyHandler = () => {
-      const currentPage = pageRef.current;
-      if (!['main', 'dictate'].includes(currentPage)) {
-        useToastStore.getState().show({
-          message: 'No speech detected. Try again — make sure your mic is working.',
-          type: 'info',
-          durationMs: 5000,
-        });
-      }
+    const emptyHandler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const isHallucination = detail?.reason === 'hallucination';
+      useToastStore.getState().show({
+        message: isHallucination
+          ? `Recording discarded — mic may not be picking up your voice clearly.`
+          : 'No speech detected in recording.',
+        type: 'warning',
+        durationMs: 8000,
+        action: {
+          label: 'Check Mic Settings',
+          onClick: () => {
+            setPage('settings');
+            // Small delay to let settings render, then switch to Input tab
+            setTimeout(() => window.dispatchEvent(new CustomEvent('ironmic:settings-tab', { detail: 'input' })), 100);
+          },
+        },
+      });
+    };
+
+    const lowAudioHandler = () => {
+      useToastStore.getState().show({
+        message: 'Low audio detected — your mic may not be picking up clearly. Check Settings > Input.',
+        type: 'warning',
+        durationMs: 6000,
+        action: {
+          label: 'Check Mic',
+          onClick: () => {
+            setPage('settings');
+            setTimeout(() => window.dispatchEvent(new CustomEvent('ironmic:settings-tab', { detail: 'input' })), 100);
+          },
+        },
+      });
     };
 
     window.addEventListener('ironmic:dictation-complete', handler);
     window.addEventListener('ironmic:dictation-empty', emptyHandler);
+    window.addEventListener('ironmic:dictation-low-audio', lowAudioHandler);
     return () => {
       window.removeEventListener('ironmic:dictation-complete', handler);
       window.removeEventListener('ironmic:dictation-empty', emptyHandler);
+      window.removeEventListener('ironmic:dictation-low-audio', lowAudioHandler);
     };
   }, []);
 
   useEffect(() => {
     const handler = (e: Event) => {
       const target = (e as CustomEvent).detail as string;
-      if (['home', 'main', 'ai', 'dictate', 'listen', 'notes', 'search', 'analytics', 'settings'].includes(target)) {
+      if (['home', 'main', 'ai', 'dictate', 'listen', 'notes', 'search', 'analytics', 'meetings', 'settings'].includes(target)) {
         setPage(target as Page);
       }
     };
@@ -189,9 +240,8 @@ export function Layout() {
 
   const handleNavigate = useCallback((p: string) => setPage(p as Page), []);
 
-  const coreItems = NAV_ITEMS.filter((n) => n.section === 'core' && (n.id !== 'ai' || aiEnabled));
-  const toolItems = NAV_ITEMS.filter((n) => n.section === 'tools');
-  const systemItems = NAV_ITEMS.filter((n) => n.section === 'system');
+  const workspaceItems = NAV_ITEMS.filter((n) => n.section === 'workspace');
+  const discoverItems = NAV_ITEMS.filter((n) => n.section === 'discover' && (n.id !== 'ai' || aiEnabled));
 
   return (
     <div className="flex h-screen bg-iron-bg">
@@ -221,15 +271,12 @@ export function Layout() {
 
         {/* Nav sections */}
         <nav className="flex-1 overflow-y-auto px-2 space-y-4">
-          <NavSection label="Main" items={coreItems} page={page} setPage={setPage} expanded={sidebarExpanded} />
-          <NavSection label="Tools" items={toolItems} page={page} setPage={setPage} expanded={sidebarExpanded} />
+          <NavSection label="Workspace" items={workspaceItems} page={page} setPage={setPage} expanded={sidebarExpanded} />
+          <NavSection label="Discover" items={discoverItems} page={page} setPage={setPage} expanded={sidebarExpanded} />
         </nav>
 
-        {/* Bottom: system nav + collapse toggle */}
-        <div className="px-2 pb-3 space-y-1">
-          {systemItems.map((item) => (
-            <NavButton key={item.id} item={item} active={page === item.id} onClick={() => setPage(item.id)} expanded={sidebarExpanded} />
-          ))}
+        {/* Bottom: collapse toggle */}
+        <div className="px-2 pb-3">
           <button
             onClick={() => setSidebarExpanded(!sidebarExpanded)}
             className="w-full flex items-center justify-center py-2 text-iron-text-muted hover:text-iron-text-secondary transition-colors"
@@ -244,12 +291,36 @@ export function Layout() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
         <div
-          className="flex items-center justify-between px-5 py-3 border-b border-iron-border bg-iron-surface/50 backdrop-blur-sm"
+          className="flex items-center justify-between px-5 py-2.5 border-b border-iron-border bg-iron-surface/50 backdrop-blur-sm"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
-          <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          {/* Page title */}
+          <div className="flex items-center gap-4" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            {page !== 'home' && (() => {
+              const meta = PAGE_META[page];
+              const Icon = meta.icon;
+              return (
+                <div className="flex items-center gap-2">
+                  <Icon className="w-4 h-4 text-iron-text-muted" />
+                  <span className="text-sm font-medium text-iron-text">{meta.label}</span>
+                </div>
+              );
+            })()}
             <RecordingIndicator />
           </div>
+          {/* Settings gear */}
+          <button
+            onClick={() => setPage('settings')}
+            title="Settings"
+            className={`p-1.5 rounded-lg transition-colors ${
+              page === 'settings'
+                ? 'bg-iron-accent/10 text-iron-accent-light'
+                : 'text-iron-text-muted hover:text-iron-text-secondary hover:bg-iron-surface-hover'
+            }`}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            <Settings className="w-4 h-4" />
+          </button>
         </div>
 
         {page === 'main' && <GpuPrompt />}
