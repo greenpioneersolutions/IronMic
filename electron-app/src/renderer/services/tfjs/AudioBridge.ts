@@ -167,38 +167,43 @@ export class AudioBridge {
   stopRecording(): { buffer: Uint8Array | null; durationSeconds: number } {
     this.isRecordingAudio = false;
 
-    if (this.recordingBuffer.length === 0) {
+    // Snapshot and clear the buffer atomically so no new frames arrive during processing
+    const frames = this.recordingBuffer;
+    this.recordingBuffer = [];
+
+    if (frames.length === 0) {
       console.warn('[AudioBridge] Recording buffer is empty');
       return { buffer: null, durationSeconds: 0 };
     }
 
-    // Concatenate all frames
-    const totalSamples = this.recordingBuffer.reduce((sum, f) => sum + f.length, 0);
+    // Concatenate all frames with bounds checking
+    const totalSamples = frames.reduce((sum, f) => sum + f.length, 0);
     const sampleRate = this.audioContext?.sampleRate ?? 16000;
     const durationSeconds = totalSamples / sampleRate;
+
+    // Safe frame concatenation helper
+    const concatFrames = (dest: Float32Array, src: Float32Array[]) => {
+      let offset = 0;
+      for (const frame of src) {
+        if (offset + frame.length > dest.length) break; // safety guard
+        dest.set(frame, offset);
+        offset += frame.length;
+      }
+    };
 
     // If AudioContext sample rate isn't 16kHz, we need to resample
     let samples: Float32Array;
     if (sampleRate === 16000) {
       samples = new Float32Array(totalSamples);
-      let offset = 0;
-      for (const frame of this.recordingBuffer) {
-        samples.set(frame, offset);
-        offset += frame.length;
-      }
+      concatFrames(samples, frames);
     } else {
       // Simple linear resampling to 16kHz
       const ratio = 16000 / sampleRate;
       const outputLen = Math.floor(totalSamples * ratio);
       samples = new Float32Array(outputLen);
 
-      // Build flat input
       const input = new Float32Array(totalSamples);
-      let offset = 0;
-      for (const frame of this.recordingBuffer) {
-        input.set(frame, offset);
-        offset += frame.length;
-      }
+      concatFrames(input, frames);
 
       for (let i = 0; i < outputLen; i++) {
         const srcIdx = i / ratio;
@@ -217,7 +222,6 @@ export class AudioBridge {
       pcmView.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
     }
 
-    this.recordingBuffer = [];
     const outputDuration = samples.length / 16000;
     console.log(`[AudioBridge] Recording buffer: ${totalSamples} samples @ ${sampleRate}Hz → ${samples.length} samples @ 16kHz (${outputDuration.toFixed(2)}s)`);
 

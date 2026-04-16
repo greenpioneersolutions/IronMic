@@ -76,6 +76,14 @@ export function InputSettings() {
   function handleSelectDevice(device: AudioDevice) {
     setSelectedDeviceId(device.id);
     saveDeviceSelection(device.id, device.name);
+    // Update the active device display with the selected device info
+    setCurrentDevice({
+      name: device.name,
+      available: true,
+      sampleRate: device.sampleRate || 48000,
+      channels: device.channels || 1,
+      sampleFormat: null,
+    });
     setDeviceChangeNotice(null);
     // Stop monitoring so it restarts with the new device
     if (monitoring) { stopMonitoring(); }
@@ -139,7 +147,13 @@ export function InputSettings() {
       const deviceJson = await window.ironmic.getCurrentAudioDevice().catch(
         () => '{"name":null,"available":false,"sampleRate":0,"channels":0,"sampleFormat":null}'
       );
-      setCurrentDevice(JSON.parse(deviceJson));
+      const parsedDevice = JSON.parse(deviceJson);
+      // If native addon can't detect a device, fall back to the saved device name
+      if (!parsedDevice.available && savedDeviceName) {
+        setCurrentDevice({ name: savedDeviceName, available: true, sampleRate: 0, channels: 0, sampleFormat: null });
+      } else {
+        setCurrentDevice(parsedDevice);
+      }
 
       // Get labeled device list from Web Audio API
       try {
@@ -417,7 +431,7 @@ export function InputSettings() {
               </div>
             </div>
           ) : (
-            <p className="text-xs text-red-400">No input device detected. Check that a microphone is connected.</p>
+            <p className="text-xs text-iron-text-muted">Select a device below to set your active input. Device details require the native audio addon.</p>
           )}
         </div>
       </Card>
