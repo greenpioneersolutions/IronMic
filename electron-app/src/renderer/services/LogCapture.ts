@@ -66,6 +66,25 @@ class LogCaptureService {
         : String(event.reason);
       this.add('error', `Unhandled rejection: ${reason}`, 'promise');
     });
+
+    // Periodically fetch main process errors (they can't push to renderer easily)
+    this.pollMainProcessErrors();
+    setInterval(() => this.pollMainProcessErrors(), 5000);
+  }
+
+  private mainErrorsSeen = 0;
+
+  private async pollMainProcessErrors() {
+    try {
+      const ironmic = (window as any).ironmic;
+      if (!ironmic?.getMainErrors) return;
+      const errors: Array<{ time: string; message: string }> = await ironmic.getMainErrors();
+      // Only add new ones
+      for (let i = this.mainErrorsSeen; i < errors.length; i++) {
+        this.add('error', errors[i].message, 'main-process');
+      }
+      this.mainErrorsSeen = errors.length;
+    } catch { /* ignore — preload may not have this method yet */ }
   }
 
   private capture(level: LogLevel, args: any[]) {

@@ -2,12 +2,29 @@
  * Electron main process entry point.
  */
 
-import { app, BrowserWindow, session, globalShortcut, nativeImage } from 'electron';
+import { app, BrowserWindow, session, globalShortcut, nativeImage, ipcMain } from 'electron';
 import path from 'path';
 import { registerIpcHandlers } from './ipc-handlers';
 import { createTray, destroyTray, updateTrayState } from './tray';
 import { ensureBundledVoices, ensureBundledTFJSModels } from './model-downloader';
 import { startMeetingAppDetection } from './meeting-app-detector';
+
+// ── Main process crash catching ──
+// Stores errors in memory so the renderer can fetch them via IPC
+const mainProcessErrors: Array<{ time: string; message: string }> = [];
+
+process.on('uncaughtException', (error) => {
+  const entry = { time: new Date().toISOString(), message: `[main] Uncaught: ${error.message}\n${error.stack}` };
+  mainProcessErrors.push(entry);
+  console.error('[main] Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason: any) => {
+  const msg = reason instanceof Error ? `${reason.message}\n${reason.stack}` : String(reason);
+  const entry = { time: new Date().toISOString(), message: `[main] Unhandled rejection: ${msg}` };
+  mainProcessErrors.push(entry);
+  console.error('[main] Unhandled rejection:', reason);
+});
 
 // Set the models directory env var BEFORE the Rust addon loads.
 // In production, models go to the user's app-data directory (writable).
@@ -129,6 +146,9 @@ app.whenReady().then(() => {
   blockAllNetworkRequests();
   setupMediaPermissions();
   registerIpcHandlers();
+
+  // IPC: let renderer fetch main process errors for the logs page
+  ipcMain.handle('ironmic:get-main-errors', () => mainProcessErrors);
   createWindow();
   createTray(() => app.quit());
   registerGlobalHotkey();

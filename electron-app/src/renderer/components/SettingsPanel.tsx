@@ -5,6 +5,7 @@ import { ModelManager } from './ModelManager';
 import { ModelImportSection, ModelImportBanner } from './ModelImportBanner';
 import { InputSettings } from './InputSettings';
 import { LogsPage } from './LogsPage';
+import { logCapture } from '../services/LogCapture';
 import { DataManager } from './DataManager';
 import { HotkeyRecorder } from './HotkeyRecorder';
 import { Toggle, Card } from './ui';
@@ -29,6 +30,15 @@ const TABS: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
 
 export function SettingsPanel() {
   const [tab, setTab] = useState<SettingsTab>('general');
+  const [errorCount, setErrorCount] = useState(0);
+
+  // Track error count for the Logs tab badge
+  useEffect(() => {
+    const update = () => setErrorCount(logCapture.getCounts().error);
+    update();
+    const unsub = logCapture.subscribe(update);
+    return unsub;
+  }, []);
 
   // Listen for external tab navigation (e.g. from toast "Check Mic Settings" button)
   // Map old tab names to new consolidated tabs for backward compat
@@ -69,7 +79,12 @@ export function SettingsPanel() {
               }`}
             >
               <Icon className="w-4 h-4" />
-              {label}
+              <span className="flex-1 text-left">{label}</span>
+              {id === 'logs' && errorCount > 0 && (
+                <span className="text-[9px] font-bold text-red-400 bg-red-500/15 px-1.5 py-0.5 rounded-full min-w-[18px] text-center">
+                  {errorCount > 99 ? '99+' : errorCount}
+                </span>
+              )}
             </button>
           ))}
         </nav>

@@ -38,6 +38,9 @@ const api = {
   getSetting: (key: string) => ipcRenderer.invoke('ironmic:get-setting', key),
   setSetting: (key: string, value: string) => ipcRenderer.invoke('ironmic:set-setting', key, value),
 
+  // Diagnostics
+  getMainErrors: () => ipcRenderer.invoke('ironmic:get-main-errors'),
+
   // Clipboard
   copyToClipboard: (text: string) => ipcRenderer.invoke('ironmic:copy-to-clipboard', text),
 
