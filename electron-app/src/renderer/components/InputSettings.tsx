@@ -173,24 +173,33 @@ export function InputSettings() {
       }));
       setDevices(deviceList);
 
+      // Helper: set both selectedDeviceId and currentDevice from a device list entry
+      const activateDevice = (device: AudioDevice) => {
+        setSelectedDeviceId(device.id);
+        // If the native addon didn't give us real device info, use the Web Audio device name
+        if (!parsedDevice.available) {
+          setCurrentDevice({ name: device.name, available: true, sampleRate: 0, channels: 0, sampleFormat: null });
+        }
+      };
+
       // Restore saved selection, or fall back to default
       if (savedDeviceId && deviceList.find(d => d.id === savedDeviceId)) {
-        setSelectedDeviceId(savedDeviceId);
+        activateDevice(deviceList.find(d => d.id === savedDeviceId)!);
       } else if (savedDeviceName) {
         // Device ID may have changed (browser regenerates them) — match by name
         const byName = deviceList.find(d => d.name === savedDeviceName);
         if (byName) {
-          setSelectedDeviceId(byName.id);
+          activateDevice(byName);
           saveDeviceSelection(byName.id, byName.name); // Update stored ID
         } else {
           // Saved device not found — use default
           const def = deviceList.find(d => d.isDefault) || deviceList[0];
-          if (def) setSelectedDeviceId(def.id);
+          if (def) activateDevice(def);
         }
       } else {
         // No saved preference — use default
         const def = deviceList.find(d => d.isDefault) || deviceList[0];
-        if (def) setSelectedDeviceId(def.id);
+        if (def) activateDevice(def);
       }
     } catch (err) {
       console.error('[InputSettings] Failed to load device info:', err);
@@ -287,28 +296,53 @@ export function InputSettings() {
     }
 
     try {
-      let stream = streamRef.current;
-      if (!stream) {
-        stream = await navigator.mediaDevices.getUserMedia(getAudioConstraints());
-        streamRef.current = stream;
-      }
+      // Always get a fresh stream for test recording — don't reuse the monitoring
+      // stream because its tracks may be ended, or the MediaRecorder may not
+      // produce valid output from an already-consumed stream
+      const testStream = await navigator.mediaDevices.getUserMedia(getAudioConstraints());
+      console.log('[InputSettings] Test recording stream obtained, tracks:', testStream.getAudioTracks().map(t => `${t.label} (${t.readyState})`));
 
       chunksRef.current = [];
-      const recorder = new MediaRecorder(stream);
+
+      // Try supported MIME types — different platforms support different codecs
+      let mimeType: string | undefined;
+      for (const candidate of ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4', '']) {
+        if (!candidate || MediaRecorder.isTypeSupported(candidate)) {
+          mimeType = candidate || undefined;
+          break;
+        }
+      }
+      console.log('[InputSettings] MediaRecorder using MIME type:', mimeType || 'browser default');
+
+      const recorder = new MediaRecorder(testStream, mimeType ? { mimeType } : undefined);
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (e) => {
+        console.log(`[InputSettings] Test recording chunk: ${e.data.size} bytes`);
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
 
       recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        // Stop the test stream tracks (we created a fresh one)
+        testStream.getTracks().forEach(t => t.stop());
+
+        const totalSize = chunksRef.current.reduce((s, c) => s + c.size, 0);
+        console.log(`[InputSettings] Test recording complete: ${chunksRef.current.length} chunks, ${totalSize} bytes`);
+
+        if (totalSize === 0) {
+          console.warn('[InputSettings] Test recording produced 0 bytes — no audio captured');
+          setTestRecording(false);
+          return;
+        }
+
+        const blob = new Blob(chunksRef.current, { type: mimeType || 'audio/webm' });
         const url = URL.createObjectURL(blob);
         setTestAudioUrl(url);
         setTestRecording(false);
       };
 
-      recorder.start();
+      // Request data every 250ms to ensure we get chunks even on short recordings
+      recorder.start(250);
       setTestRecording(true);
 
       // Auto-stop after 5 seconds
@@ -412,23 +446,19 @@ export function InputSettings() {
             <p className="text-sm font-medium text-iron-text">Active Input Device</p>
           </div>
           {currentDevice?.available ? (
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div>
-                <p className="text-iron-text-muted">Device</p>
-                <p className="text-iron-text font-medium mt-0.5">{currentDevice.name}</p>
+            <div className="space-y-1 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                <p className="text-iron-text font-medium">{currentDevice.name}</p>
               </div>
-              <div>
-                <p className="text-iron-text-muted">Sample Rate</p>
-                <p className="text-iron-text font-medium mt-0.5">{(currentDevice.sampleRate / 1000).toFixed(1)} kHz</p>
-              </div>
-              <div>
-                <p className="text-iron-text-muted">Channels</p>
-                <p className="text-iron-text font-medium mt-0.5">{currentDevice.channels === 1 ? 'Mono' : currentDevice.channels === 2 ? 'Stereo' : `${currentDevice.channels}ch`}</p>
-              </div>
-              <div>
-                <p className="text-iron-text-muted">Format</p>
-                <p className="text-iron-text font-medium mt-0.5">{currentDevice.sampleFormat || 'Auto'}</p>
-              </div>
+              {(currentDevice.sampleRate > 0 || currentDevice.channels > 0) && (
+                <p className="text-iron-text-muted pl-3.5">
+                  {currentDevice.sampleRate > 0 ? `${(currentDevice.sampleRate / 1000).toFixed(1)} kHz` : ''}
+                  {currentDevice.sampleRate > 0 && currentDevice.channels > 0 ? ' · ' : ''}
+                  {currentDevice.channels > 0 ? (currentDevice.channels === 1 ? 'Mono' : currentDevice.channels === 2 ? 'Stereo' : `${currentDevice.channels}ch`) : ''}
+                  {currentDevice.sampleFormat ? ` · ${currentDevice.sampleFormat}` : ''}
+                </p>
+              )}
             </div>
           ) : (
             <p className="text-xs text-iron-text-muted">Select a device below to set your active input. Device details require the native audio addon.</p>

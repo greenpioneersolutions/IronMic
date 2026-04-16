@@ -87,9 +87,12 @@ export function MeetingSessionCard({ session, onDelete, onRename }: Props) {
   return (
     <Card variant="default" padding="none" className="animate-fade-in">
       {/* Header */}
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-iron-surface-hover/50 transition-colors"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(!expanded); } }}
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-iron-surface-hover/50 transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-iron-accent/10 flex items-center justify-center flex-shrink-0">
@@ -164,7 +167,7 @@ export function MeetingSessionCard({ session, onDelete, onRename }: Props) {
           </button>
           {expanded ? <ChevronDown className="w-4 h-4 text-iron-text-muted" /> : <ChevronRight className="w-4 h-4 text-iron-text-muted" />}
         </div>
-      </button>
+      </div>
 
       {/* Expanded content */}
       {expanded && (
