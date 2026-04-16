@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, Component, type ReactNode } from 'react';
 import {
   Mic, Settings, List, Sparkles, StickyNote, Search, Home,
-  ChevronLeft, ChevronRight, Volume2, PenTool, BarChart3, Users,
+  ChevronLeft, ChevronRight, Volume2, PenTool, BarChart3, Users, AlertTriangle,
 } from 'lucide-react';
 import { RecordingIndicator } from './RecordingIndicator';
 import { Timeline } from './Timeline';
@@ -327,16 +327,18 @@ export function Layout() {
 
         {/* Content */}
         <div className="flex-1 overflow-hidden">
-          {page === 'home' && <WelcomePage onNavigate={handleNavigate} />}
-          {page === 'main' && <Timeline />}
-          {page === 'ai' && <AIChat />}
-          {page === 'dictate' && <DictatePage />}
-          {page === 'listen' && <ListenPage />}
-          {page === 'notes' && <NotesPage />}
-          {page === 'search' && <SearchPage />}
-          {page === 'analytics' && <AnalyticsPage />}
-          {page === 'meetings' && <MeetingPage />}
-          {page === 'settings' && <SettingsPanel />}
+          <ContentErrorBoundary onReset={() => setPage('home')}>
+            {page === 'home' && <WelcomePage onNavigate={handleNavigate} />}
+            {page === 'main' && <Timeline />}
+            {page === 'ai' && <AIChat />}
+            {page === 'dictate' && <DictatePage />}
+            {page === 'listen' && <ListenPage />}
+            {page === 'notes' && <NotesPage />}
+            {page === 'search' && <SearchPage />}
+            {page === 'analytics' && <AnalyticsPage />}
+            {page === 'meetings' && <MeetingPage />}
+            {page === 'settings' && <SettingsPanel />}
+          </ContentErrorBoundary>
         </div>
       </div>
 
@@ -399,6 +401,47 @@ function NavButton({ item, active, onClick, expanded }: {
       <span className="truncate">{item.label}</span>
     </button>
   );
+}
+
+// ── Error Boundary ──
+
+class ContentErrorBoundary extends Component<{ children: ReactNode; onReset: () => void }, { error: Error | null }> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: any) {
+    console.error('[ContentErrorBoundary] Render crash:', error, info?.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+          <AlertTriangle className="w-10 h-10 text-iron-warning mb-4" />
+          <h2 className="text-base font-semibold text-iron-text mb-2">Something went wrong</h2>
+          <p className="text-xs text-iron-text-muted mb-1 max-w-md">
+            {this.state.error.message}
+          </p>
+          <p className="text-[10px] text-iron-text-muted mb-4 max-w-md font-mono break-all">
+            {this.state.error.stack?.split('\n')[1]?.trim() || ''}
+          </p>
+          <button
+            onClick={() => {
+              this.setState({ error: null });
+              this.props.onReset();
+            }}
+            className="px-4 py-2 text-xs font-medium bg-iron-accent/10 text-iron-accent-light rounded-lg border border-iron-accent/20 hover:bg-iron-accent/20 transition-colors"
+          >
+            Go to Home
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 // ── Mic Shield Button ──

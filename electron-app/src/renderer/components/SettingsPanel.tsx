@@ -4,6 +4,7 @@ import { DictionaryManager } from './DictionaryManager';
 import { ModelManager } from './ModelManager';
 import { ModelImportSection, ModelImportBanner } from './ModelImportBanner';
 import { InputSettings } from './InputSettings';
+import { LogsPage } from './LogsPage';
 import { DataManager } from './DataManager';
 import { HotkeyRecorder } from './HotkeyRecorder';
 import { Toggle, Card } from './ui';
@@ -12,10 +13,10 @@ import {
   Cpu, Database, BookOpen, Lock, ClipboardCheck, Eye, EyeOff,
   Clock, AlertTriangle, CheckCircle, Info, Wifi, WifiOff, FileWarning,
   Trash2, HardDrive, Sparkles, RefreshCw, Download, Brain,
-  Mic, Route, Users, Search, Bell, Workflow, Sliders,
+  Mic, Route, Users, Search, Bell, Workflow, Sliders, ScrollText,
 } from 'lucide-react';
 
-type SettingsTab = 'general' | 'input' | 'speech' | 'ai' | 'models' | 'data' | 'security' | 'voice-ai' | 'input-voice' | 'models-speech' | 'data-security';
+type SettingsTab = 'general' | 'input' | 'speech' | 'ai' | 'models' | 'data' | 'security' | 'voice-ai' | 'input-voice' | 'models-speech' | 'data-security' | 'logs';
 
 const TABS: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
   { id: 'general', label: 'General', icon: Settings },
@@ -23,6 +24,7 @@ const TABS: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
   { id: 'models-speech', label: 'Models', icon: Cpu },
   { id: 'ai', label: 'AI Assistant', icon: Sparkles },
   { id: 'data-security', label: 'Security', icon: Shield },
+  { id: 'logs', label: 'Logs', icon: ScrollText },
 ];
 
 export function SettingsPanel() {
@@ -74,15 +76,21 @@ export function SettingsPanel() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="p-6 max-w-2xl mx-auto space-y-6 pb-16">
-          {tab === 'general' && <GeneralSettings />}
-          {tab === 'input-voice' && <InputVoiceSettings />}
-          {tab === 'models-speech' && <ModelsSpeechSettings />}
-          {tab === 'ai' && <AIAssistSettings />}
-          {tab === 'data-security' && <DataSecuritySettings />}
+      {tab === 'logs' ? (
+        <div className="flex-1 overflow-hidden">
+          <LogsPage />
         </div>
-      </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto">
+          <div className="p-6 max-w-2xl mx-auto space-y-6 pb-16">
+            {tab === 'general' && <GeneralSettings />}
+            {tab === 'input-voice' && <InputVoiceSettings />}
+            {tab === 'models-speech' && <ModelsSpeechSettings />}
+            {tab === 'ai' && <AIAssistSettings />}
+            {tab === 'data-security' && <DataSecuritySettings />}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
