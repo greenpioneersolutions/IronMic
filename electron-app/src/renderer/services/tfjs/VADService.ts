@@ -201,23 +201,23 @@ export class VADService {
   // ── Internal ──
 
   private processFrame(frame: Float32Array): void {
-    // Accumulate into Silero-sized frames
-    const remaining = SILERO_FRAME_SAMPLES - this.frameBufferOffset;
-    const toCopy = Math.min(frame.length, remaining);
+    // Process the input frame in chunks that fit the Silero buffer (512 samples).
+    // AudioWorklet sends 128-sample frames, but ScriptProcessor fallback sends
+    // 2048-sample frames — we must handle frames larger than the buffer.
+    let readOffset = 0;
 
-    this.frameBuffer.set(frame.subarray(0, toCopy), this.frameBufferOffset);
-    this.frameBufferOffset += toCopy;
+    while (readOffset < frame.length) {
+      const remaining = SILERO_FRAME_SAMPLES - this.frameBufferOffset;
+      const available = frame.length - readOffset;
+      const toCopy = Math.min(available, remaining);
 
-    if (this.frameBufferOffset >= SILERO_FRAME_SAMPLES) {
-      // We have a full frame — classify it
-      this.classifyFrame(new Float32Array(this.frameBuffer));
-      this.frameBufferOffset = 0;
+      this.frameBuffer.set(frame.subarray(readOffset, readOffset + toCopy), this.frameBufferOffset);
+      this.frameBufferOffset += toCopy;
+      readOffset += toCopy;
 
-      // Handle leftover samples from this frame
-      if (toCopy < frame.length) {
-        const leftover = frame.subarray(toCopy);
-        this.frameBuffer.set(leftover);
-        this.frameBufferOffset = leftover.length;
+      if (this.frameBufferOffset >= SILERO_FRAME_SAMPLES) {
+        this.classifyFrame(new Float32Array(this.frameBuffer));
+        this.frameBufferOffset = 0;
       }
     }
   }
