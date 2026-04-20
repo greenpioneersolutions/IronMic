@@ -2,6 +2,29 @@
 
 All notable changes to IronMic will be documented in this file.
 
+## [1.6.0] - 2026-04-20
+
+### Added
+
+#### Enterprise Evaluation Guide
+- **ENTERPRISE.md** — Comprehensive enterprise evaluation document covering architecture, security model, privacy guarantees, deployment options (standard, air-gapped, build from source), system requirements, model management, compliance mapping (HIPAA, GDPR, SOC 2, CCPA, FERPA, ITAR), performance benchmarks, licensing, and FAQ. Designed for IT teams, security reviewers, and procurement evaluating IronMic for organizational deployment.
+
+#### Feature Roadmap & Ideas Library
+- **15 feature proposals** — Complete design documents for planned features, each with full architecture diagrams, database schemas, implementation phases, N-API surface definitions, privacy analysis, performance considerations, and success metrics. New `ideas/` directory with individual proposal files.
+- **ideas/README.md** — Index of all proposals with impact/feasibility ratings, a prioritization matrix, and suggested implementation order across 4 tiers.
+
+##### New Feature Proposals (5)
+- **Voice-Powered Accessibility Layer** — System-wide hands-free computer control via OS accessibility APIs (AXUIElement, UI Automation, AT-SPI). Click buttons, fill forms, manage windows by voice.
+- **Multi-Language Dictation & Translation** — Dictate in any of Whisper's 99 languages with auto-detection. On-device translation via local LLM with user-defined glossaries.
+- **Voice Journal & Mood/Sentiment Tracking** — Dedicated journaling mode with TF.js sentiment analysis, mood trend charts, weekly reflections, and insight generation.
+- **Audio Summarization & Digest Generation** — Automatic daily briefings and weekly digests with hierarchical summarization and action item tracking.
+- **Collaborative Transcript Review** — Local HTTP + WebSocket server for LAN-based transcript review with real-time annotations, corrections, and approval workflows.
+
+##### Existing Feature Proposals (10)
+- Ambient Context Engine, Live Coaching & Communication Analytics, Multi-Device Mesh, Offline Meeting Copilot, Organizational Voice Intelligence, Programmable Voice Macros, Speaker Separation & Voice Identity, Voice-Driven Workspace Automation, Voice Fingerprint Security, Voice-to-Structured Data.
+
+---
+
 ## [1.5.0] - 2026-04-15
 
 ### Added
