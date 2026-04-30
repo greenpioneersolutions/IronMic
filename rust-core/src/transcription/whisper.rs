@@ -213,7 +213,7 @@ impl WhisperEngine {
     /// Must be called BEFORE `load_model()`. Has no effect once the model is
     /// already loaded (callers should check `is_loaded()` first).
     pub fn set_n_threads(&mut self, n: u32) {
-        self.config.n_threads = n.clamp(1, 16);
+        self.config.n_threads = n.max(1).min(16);
     }
 
     /// Change the active model. Unloads the current model — call load_model() after.

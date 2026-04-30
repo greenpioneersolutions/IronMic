@@ -45,7 +45,6 @@ const SELECT_COLS: &str =
 
 impl Database {
     /// Add a new transcript segment for a meeting session.
-    #[allow(clippy::too_many_arguments)]
     pub fn add_transcript_segment(
         &self,
         session_id: &str,

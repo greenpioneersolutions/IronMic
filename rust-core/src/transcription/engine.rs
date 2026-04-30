@@ -41,7 +41,6 @@ use crate::error::IronMicError;
 /// Mirrors the pattern in [`crate::transcription::whisper`] so Moonshine and
 /// Whisper models share the same root directory. The Electron host sets
 /// `IRONMIC_MODELS_DIR` to the app's `Resources/models` path in production.
-#[allow(dead_code)]
 fn models_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("IRONMIC_MODELS_DIR") {
         return PathBuf::from(dir);
@@ -77,7 +76,6 @@ impl EngineKind {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "moonshine-base" => Some(EngineKind::MoonshineBase),
