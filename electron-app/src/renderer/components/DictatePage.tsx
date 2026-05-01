@@ -141,6 +141,21 @@ export function DictatePage() {
    *  editor so the reactive sync effect doesn't re-apply identical content
    *  every render. */
   const lastAppliedSyncKeyRef = useRef<string>('');
+  /** Monotonic save id. Incremented at the start of every saveContent call.
+   *  After every awaited round-trip we re-check it: if a newer save kicked off
+   *  while we were waiting, the older one bows out and lets the newer one's
+   *  result be the source of truth. Protects against stale store writes when
+   *  the user types fast across multiple debounce windows. */
+  const saveRevRef = useRef(0);
+  /** Bumped on every user keystroke (onUpdate). Snapshotted into saveContent
+   *  so the reactive sync effect can tell "this store update is the echo of
+   *  my own save" (lastSyncedLocalRev === localEditsRev) from "this is an
+   *  external change I should apply" (newer localEditsRev or different rev). */
+  const localEditsRevRef = useRef(0);
+  /** Set to localEditsRevRef.current at the moment a save completes. The sync
+   *  effect early-returns when this matches the current local rev AND the
+   *  incoming JSON matches what the editor already holds. */
+  const lastSyncedLocalRevRef = useRef(0);
 
   // ── Dictation state lives in the store (foolproof across navigation) ──
   const status = useDictationStore((s) => s.status);
@@ -275,14 +290,25 @@ export function DictatePage() {
         return;
       }
       setSaved(false);
+      // Bump the local-edit revision so the reactive sync effect can tell our
+      // own save echo from a genuine external update.
+      localEditsRevRef.current += 1;
+      const committedRev = localEditsRevRef.current;
       const text = editor.getText();
       setCharCount(text.length);
       setWordCount(text.trim() ? text.trim().split(/\s+/).length : 0);
 
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => {
+        // Snapshot editor state at fire time (NOT at closure-creation time) so
+        // saveContent never reads from a stale `editor` reference. Plaintext
+        // comes from getText(), not from a regex over HTML — that regex
+        // collapses paragraph breaks and was the proximate cause of the
+        // formatting-loss bug.
+        const plainText = editor.getText().trim();
+        const json = JSON.stringify(editor.getJSON());
         const html = editor.getHTML();
-        void saveContent(html);
+        void saveContent({ plainText, json, html, committedRev });
         saveDraft(html, useDictationStore.getState().entryId, useDictationStore.getState().title);
         setSaved(true);
       }, 1000);
@@ -303,11 +329,27 @@ export function DictatePage() {
 
   /** Persist editor content — creates the entry on first meaningful keystroke
    *  so that typing (without dictating) is also saved. Only skips creation when
-   *  the editor is entirely empty. */
-  const saveContent = useCallback(async (html: string) => {
-    const api = window.ironmic;
-    const plainText = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+   *  the editor is entirely empty.
+   *
+   *  Important: takes a SNAPSHOT (plainText/json/html) so it never reads from
+   *  the live `editor` ref — closing over `editor` would be a footgun (stale
+   *  on first render, drifting under us if a programmatic setContent runs
+   *  during a pending save). Caller passes the snapshot it captured at fire
+   *  time. */
+  const saveContent = useCallback(async (snapshot: {
+    plainText: string;
+    json: string;
+    html: string;
+    committedRev: number;
+  }) => {
+    const { plainText, json, html, committedRev } = snapshot;
     if (!plainText) return;
+    const api = window.ironmic;
+
+    // Stale-save guard: if a newer save kicks off while we're awaiting, the
+    // older save bows out so it can't overwrite the newer one's store mirror.
+    const myRev = ++saveRevRef.current;
+    const isCurrent = () => myRev === saveRevRef.current;
 
     let currentId = useDictationStore.getState().entryId;
 
@@ -315,6 +357,7 @@ export function DictatePage() {
       // First meaningful content typed without dictating — materialize the entry.
       const state = useDictationStore.getState();
       const n = await computeNextNoteNumber();
+      if (!isCurrent()) return;
       const title = state.title || `Note #${n}`;
       const nbId = state.notebookId;
       const tagsArr = [
@@ -326,12 +369,15 @@ export function DictatePage() {
       try {
         const entry = await api.createEntry({
           rawTranscript: plainText,
+          rawTranscriptJson: json,
           tags: JSON.stringify(tagsArr),
         } as any);
+        if (!isCurrent()) return;
         currentId = (entry as any).id as string;
         useDictationStore.setState({ entryId: currentId, title });
         setLoadedEntryStatus('draft');
         saveDraft(html, currentId, title);
+        lastSyncedLocalRevRef.current = committedRev;
         try { window.dispatchEvent(new CustomEvent('ironmic:entries-changed')); } catch { /* noop */ }
       } catch (err) {
         console.error('[DictatePage] Failed to create entry on first keystroke:', err);
@@ -348,10 +394,16 @@ export function DictatePage() {
           ?? storeEntry.entryCache.get(currentId)
           ?? null;
         const writingPolished = !!live?.polishedText && live?.displayMode === 'polished';
+        // Persist BOTH the plaintext (for FTS, timeline previews, polish input)
+        // AND the rich JSON for the active side. Never write the JSON column
+        // for the other side — leaving it absent preserves whatever rich
+        // state it already held (e.g. user previously hand-edited polished
+        // mode; we shouldn't clobber that when they edit raw).
         const updates = writingPolished
-          ? { polishedText: plainText }
-          : { rawTranscript: plainText };
+          ? { polishedText: plainText, polishedTextJson: json }
+          : { rawTranscript: plainText, rawTranscriptJson: json };
         const updated = await api.updateEntry(currentId, updates as any);
+        if (!isCurrent()) return;
         // Mirror the update into the store cache so subscribers see the change.
         if (updated) {
           const fixedId = currentId as string;
@@ -367,20 +419,26 @@ export function DictatePage() {
             return { entries: nextEntries, entryCache: nextCache };
           });
         }
+        // Mark this rev as synced BEFORE we trigger any 'entries-changed'
+        // event below, so the reactive sync effect (which fires when the
+        // store update lands) can early-out instead of clobbering the editor.
+        lastSyncedLocalRevRef.current = committedRev;
         try {
           const fresh = await api.getEntry(currentId);
+          if (!isCurrent()) return;
           const sessionId = parseMeetingTag((fresh as any)?.tags ?? null);
           if (sessionId) {
             // Pass the original HTML so the meeting detail page can render the
             // user's formatting (bold, lists, headings) rather than plain text.
             await syncMeetingEntryToSession({ sessionId, plainText, htmlContent: html });
+            if (!isCurrent()) return;
             // Tell MeetingDetailPage (if open) to reload the now-updated session.
             try { window.dispatchEvent(new CustomEvent('ironmic:entries-changed')); } catch { /* noop */ }
           }
         } catch { /* best-effort */ }
       } catch (err) { console.error('Failed to save:', err); }
     }
-  }, []);
+  }, [noteEmoji]);
 
   // ── Append arriving dictation chunks to the editor ──
   // This is the renderer's half of the streaming pipeline. The store also
@@ -446,8 +504,12 @@ export function DictatePage() {
         await storeStop();
         if (editor) {
           const html = editor.getHTML();
+          const plainText = editor.getText().trim();
+          const json = JSON.stringify(editor.getJSON());
+          localEditsRevRef.current += 1;
+          const committedRev = localEditsRevRef.current;
           saveDraft(html, useDictationStore.getState().entryId, useDictationStore.getState().title);
-          await saveContent(html);
+          await saveContent({ plainText, json, html, committedRev });
           setSaved(true);
         }
       } catch (err: any) {
@@ -619,7 +681,12 @@ export function DictatePage() {
     // quickly without dictating, debounce not fired yet).
     if (text && !useDictationStore.getState().entryId) {
       if (debounceRef.current) { clearTimeout(debounceRef.current); debounceRef.current = null; }
-      await saveContent(editor.getHTML());
+      const html = editor.getHTML();
+      const plainText = editor.getText().trim();
+      const json = JSON.stringify(editor.getJSON());
+      localEditsRevRef.current += 1;
+      const committedRev = localEditsRevRef.current;
+      await saveContent({ plainText, json, html, committedRev });
     }
 
     const currentId = useDictationStore.getState().entryId;
@@ -692,6 +759,27 @@ export function DictatePage() {
       .join('');
   }, []);
 
+  /** Apply the active-side rich content to the editor. Prefers TipTap JSON
+   *  (round-trips formatting losslessly); falls back to plaintext-wrapped HTML
+   *  for legacy notes (created before v6) or when JSON is malformed. The
+   *  caller is responsible for guarding with isApplyingRemoteContentRef so
+   *  onUpdate doesn't immediately persist the just-applied content back. */
+  const applyEntryToEditor = useCallback((entry: Entry, mode: 'raw' | 'polished') => {
+    if (!editor) return;
+    const json = mode === 'polished' ? entry.polishedTextJson : entry.rawTranscriptJson;
+    const plain = mode === 'polished' ? (entry.polishedText || '') : entry.rawTranscript;
+    if (json) {
+      try {
+        const parsed = JSON.parse(json);
+        editor.commands.setContent(parsed, false);
+        return;
+      } catch (err) {
+        console.warn('[DictatePage] malformed editor JSON, falling back to plaintext', err);
+      }
+    }
+    editor.commands.setContent(textToHtml(plain || ''), false);
+  }, [editor, textToHtml]);
+
   /** Toggle handler — flicks display mode. If polished text doesn't exist
    *  yet, kicks off polish via the store (which keeps running through any
    *  navigation). Otherwise just persists the displayMode flip. */
@@ -719,34 +807,48 @@ export function DictatePage() {
     void useEntryStore.getState().polishEntry(entryId, { rawOverride: liveRaw, force: hasExisting });
   }, [editor, entryId, isPolishing, polishedEntry?.polishedText, status, toast]);
 
-  // Reactive editor sync: whenever the persisted (mode, polishedText, raw)
-  // changes, swap the editor content to match — but only when the change
-  // comes from outside this editor (e.g., a polish that completed in the
-  // background, or the user toggling on the Timeline page). We guard the
-  // programmatic setContent with isApplyingRemoteContentRef so onUpdate
-  // doesn't immediately persist the shown text back over the other side.
+  // Reactive editor sync: applies the persisted entry to the editor when the
+  // change comes from OUTSIDE the local editor — background polish completion,
+  // sidebar selection from another component, mode toggle, collab updates.
+  // The two early-returns below distinguish "this store update is the echo of
+  // my own debounced save" (skip — editor already has the right content) from
+  // "this is genuinely external" (apply).
   useEffect(() => {
     if (!editor || !entryId) return;
     if (isPolishing) return; // overlay covers content; don't fight the user.
     if (!polishedEntry) return;
-    const desired = effectiveMode === 'polished' && polishedEntry.polishedText
-      ? polishedEntry.polishedText
-      : polishedEntry.rawTranscript;
-    const key = `${entryId}|${effectiveMode}|${(desired || '').length}|${(desired || '').slice(0, 32)}`;
+
+    const incomingJson = effectiveMode === 'polished'
+      ? polishedEntry.polishedTextJson
+      : polishedEntry.rawTranscriptJson;
+
+    // De-dupe identical re-renders: same entry, same mode, same persisted
+    // updatedAt → nothing to do.
+    const key = `${entryId}|${effectiveMode}|${polishedEntry.updatedAt}|${incomingJson ? 'j' : 'p'}`;
     if (lastAppliedSyncKeyRef.current === key) return;
-    const current = editor.getText();
-    if (current === desired) {
+
+    // Echo guard: when this update is just our own save round-tripping back
+    // through the store, the editor already holds the canonical content.
+    // Detect via (a) we have no pending local edits past the last synced rev,
+    // and (b) the incoming JSON matches what's in the editor right now.
+    if (
+      lastSyncedLocalRevRef.current === localEditsRevRef.current &&
+      incomingJson &&
+      incomingJson === JSON.stringify(editor.getJSON())
+    ) {
       lastAppliedSyncKeyRef.current = key;
       return;
     }
+
+    // Apply. The helper handles JSON-vs-plaintext fallback and malformed JSON.
     isApplyingRemoteContentRef.current = true;
     try {
-      editor.commands.setContent(textToHtml(desired || ''), false);
+      applyEntryToEditor(polishedEntry, effectiveMode);
       lastAppliedSyncKeyRef.current = key;
     } finally {
       isApplyingRemoteContentRef.current = false;
     }
-  }, [editor, entryId, effectiveMode, polishedEntry, isPolishing, textToHtml]);
+  }, [editor, entryId, effectiveMode, polishedEntry, isPolishing, applyEntryToEditor]);
 
   // Lock the editor while polish is running so the user can't type into a
   // view that's about to be replaced.
@@ -767,7 +869,14 @@ export function DictatePage() {
 
     // Flush any pending auto-save debounce.
     if (debounceRef.current) { clearTimeout(debounceRef.current); debounceRef.current = null; }
-    await saveContent(editor.getHTML());
+    {
+      const html = editor.getHTML();
+      const plainText = editor.getText().trim();
+      const json = JSON.stringify(editor.getJSON());
+      localEditsRevRef.current += 1;
+      const committedRev = localEditsRevRef.current;
+      await saveContent({ plainText, json, html, committedRev });
+    }
 
     const currentId = useDictationStore.getState().entryId;
     if (currentId) {
@@ -852,15 +961,26 @@ export function DictatePage() {
       debounceRef.current = null;
     }
     const plain = (entry.rawTranscript || '').trim();
-    // TipTap accepts HTML or plain text — wrap paragraphs so linebreaks survive.
-    const html = plain
-      ? plain.split(/\n{2,}/).map((para) => `<p>${escapeHtml(para).replace(/\n/g, '<br/>')}</p>`).join('')
-      : '';
-    editor.commands.setContent(html, false);
+    // Apply via the helper — preserves TipTap JSON formatting if the entry
+    // has it, falls back to plaintext-wrapped HTML for legacy notes.
+    // Determine which side to load from the entry's persisted displayMode
+    // (mirrors effectiveMode logic — polished only if there's polished text).
+    const sideMode: 'raw' | 'polished' =
+      entry.polishedText && entry.displayMode === 'polished' ? 'polished' : 'raw';
+    isApplyingRemoteContentRef.current = true;
+    try {
+      applyEntryToEditor(entry, sideMode);
+    } finally {
+      isApplyingRemoteContentRef.current = false;
+    }
     const text = editor.getText();
     setCharCount(text.length);
     setWordCount(text.trim() ? text.trim().split(/\s+/).length : 0);
     setSaved(true);
+    // Reset edit-revision tracking so the sync effect treats the loaded
+    // content as the canonical baseline.
+    localEditsRevRef.current = 0;
+    lastSyncedLocalRevRef.current = 0;
 
     const nextTitle = parseTitleTag(entry.tags) || 'Untitled note';
     const nextNotebook = parseNotebookTag(entry.tags) || getDefaultNotebookId();
@@ -875,8 +995,10 @@ export function DictatePage() {
     // Reflect actual persisted status so the badge is accurate for finalized notes.
     setLoadedEntryStatus(parseStatusTag(entry.tags));
     setNoteEmoji(parseEmojiTag(entry.tags) || pickRandomEmoji());
-    saveDraft(html, entry.id, nextTitle);
-  }, [editor, status, toast]);
+    // Persist the now-rendered editor HTML (which may include rich JSON-derived
+    // structure) into the localStorage draft so a refresh restores it verbatim.
+    saveDraft(editor.getHTML(), entry.id, nextTitle);
+  }, [editor, status, toast, applyEntryToEditor]);
 
   // ── Refresh the sidebar when meaningful things happen ──
   // (a) dictation finished (status went idle with an entry present), or

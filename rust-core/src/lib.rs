@@ -450,6 +450,8 @@ mod napi_exports {
         pub polished_text: Option<String>,
         pub duration_seconds: Option<f64>,
         pub source_app: Option<String>,
+        pub raw_transcript_json: Option<String>,
+        pub polished_text_json: Option<String>,
     }
 
     #[napi(object)]
@@ -465,6 +467,8 @@ mod napi_exports {
         pub is_pinned: bool,
         pub is_archived: bool,
         pub tags: Option<String>,
+        pub raw_transcript_json: Option<String>,
+        pub polished_text_json: Option<String>,
     }
 
     impl From<crate::storage::entries::Entry> for JsEntry {
@@ -481,6 +485,8 @@ mod napi_exports {
                 is_pinned: e.is_pinned,
                 is_archived: e.is_archived,
                 tags: e.tags,
+                raw_transcript_json: e.raw_transcript_json,
+                polished_text_json: e.polished_text_json,
             }
         }
     }
@@ -500,6 +506,8 @@ mod napi_exports {
         pub display_mode: Option<String>,
         pub tags: Option<String>,
         pub source_app: Option<String>,
+        pub raw_transcript_json: Option<String>,
+        pub polished_text_json: Option<String>,
     }
 
     #[napi]
@@ -511,6 +519,8 @@ mod napi_exports {
             polished_text: entry.polished_text,
             duration_seconds: entry.duration_seconds,
             source_app: entry.source_app,
+            raw_transcript_json: entry.raw_transcript_json,
+            polished_text_json: entry.polished_text_json,
         };
         let result = store.create(new).map(Into::into).map_err(napi::Error::from)?;
 
@@ -537,6 +547,8 @@ mod napi_exports {
             display_mode: updates.display_mode,
             tags: updates.tags.map(Some),
             source_app: updates.source_app.map(Some),
+            raw_transcript_json: updates.raw_transcript_json,
+            polished_text_json: updates.polished_text_json,
         };
         store.update(&id, upd).map(Into::into).map_err(Into::into)
     }
