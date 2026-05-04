@@ -191,11 +191,12 @@ function CreatePanel({
       unsubDraft?.();
       unsubFw?.();
       if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
-      // Keep the server alive when participants are still connected — the
-      // parent page watches participant count and auto-stops when all leave.
-      if (participantsRef.current.length === 0) {
-        window.ironmic?.meetingCollabStop?.().catch(() => {});
-      }
+      // Do NOT stop the server here. participantsRef is empty on every fresh
+      // mount (it's a per-render ref); a cleanup that fires before the start
+      // IPC has returned (e.g. React StrictMode's mount → unmount → mount, or
+      // simply opening the panel a second time) would kick everyone. The
+      // canonical auto-stop lives in DictatePage's effect: it stops when the
+      // modal is closed AND collabParticipantCount === 0.
     };
   }, [sessionId, hostName]);
 

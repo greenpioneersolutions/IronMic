@@ -44,6 +44,10 @@ interface Props {
   collapsed?: boolean;
   /** Called when the user clicks the collapse/expand toggle in the header. */
   onToggleCollapsed?: () => void;
+  /** When set, this entry is part of an active collab session — render a
+   *  pulsing green dot next to it so the user can see at a glance that the
+   *  shared note keeps running even when they navigate to a different note. */
+  liveCollabEntryId?: string | null;
 }
 
 interface NotebookWithNotes extends Notebook {
@@ -80,7 +84,7 @@ function shortTime(iso: string): string {
   } catch { return ''; }
 }
 
-export function NotesSidebar({ activeEntryId, onSelectEntry, onNewNote, refreshSignal, collapsed, onToggleCollapsed }: Props) {
+export function NotesSidebar({ activeEntryId, onSelectEntry, onNewNote, refreshSignal, collapsed, onToggleCollapsed, liveCollabEntryId }: Props) {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
@@ -308,6 +312,7 @@ export function NotesSidebar({ activeEntryId, onSelectEntry, onNewNote, refreshS
                       key={e.id}
                       entry={e}
                       active={activeEntryId === e.id}
+                      live={liveCollabEntryId === e.id}
                       onClick={() => onSelectEntry(e)}
                       onDelete={() => void handleDeleteEntry(e.id)}
                     />
@@ -343,6 +348,7 @@ export function NotesSidebar({ activeEntryId, onSelectEntry, onNewNote, refreshS
                     key={e.id}
                     entry={e}
                     active={activeEntryId === e.id}
+                    live={liveCollabEntryId === e.id}
                     onClick={() => onSelectEntry(e)}
                     onDelete={() => void handleDeleteEntry(e.id)}
                   />
@@ -369,8 +375,8 @@ export function NotesSidebar({ activeEntryId, onSelectEntry, onNewNote, refreshS
   );
 }
 
-function NoteRow({ entry, active, onClick, onDelete }: {
-  entry: Entry; active: boolean; onClick: () => void; onDelete: () => void;
+function NoteRow({ entry, active, live, onClick, onDelete }: {
+  entry: Entry; active: boolean; live?: boolean; onClick: () => void; onDelete: () => void;
 }) {
   const title = parseTitleTag(entry.tags) || 'Untitled';
   const emoji = parseEmojiTag(entry.tags);
@@ -396,10 +402,16 @@ function NoteRow({ entry, active, onClick, onDelete }: {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1">
             {emoji && <span className="text-[11px] leading-none flex-shrink-0">{emoji}</span>}
-            {isDraft && !emoji && (
+            {isDraft && !emoji && !live && (
               <span
                 className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0"
                 title="Draft — not yet marked Done"
+              />
+            )}
+            {live && (
+              <span
+                className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse flex-shrink-0"
+                title="Live collab session — peers are editing this note in real time"
               />
             )}
             {entry.isPinned && <Pin className="w-2.5 h-2.5 text-iron-accent-light flex-shrink-0" />}

@@ -82,14 +82,46 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;');
 }
 
-/** Parse a wire payload as a TipTap doc JSON value, or null if it isn't one.
- *  Used by collab receive paths so DictatePage can speak rich JSON to other
- *  DictatePage peers while still accepting plaintext payloads from the
- *  meeting collab components (which still send plaintext). */
-function parseTiptapDocJson(serialized: string): any | null {
+/** Wire payload version marker. Bump if the wrapper schema changes
+ *  incompatibly so receivers can ignore unknown future versions. */
+const COLLAB_WIRE_VERSION = 1;
+
+interface CollabWireMeta {
+  /** Note title (synced across the session — bug 3). */
+  title?: string;
+  /** Note emoji (synced across the session — bug 3). */
+  emoji?: string;
+}
+
+/** Pack a TipTap doc + side-channel metadata (title, emoji) into a single
+ *  wire string. We can't extend the IPC method signatures without breaking
+ *  the meeting collab components that share these channels, so the meta
+ *  rides inside the same `content` string the doc used to occupy. */
+function packCollabPayload(doc: any, meta: CollabWireMeta): string {
+  return JSON.stringify({
+    __ironmic_collab__: COLLAB_WIRE_VERSION,
+    doc,
+    meta,
+  });
+}
+
+/** Parse a wire payload. Accepts:
+ *   - the new wrapper `{__ironmic_collab__, doc, meta}` (DictatePage peers)
+ *   - a bare TipTap `{type: "doc", ...}` (older DictatePage peers)
+ *   - plaintext (meeting collab components — handled by the caller)
+ *  Returns null when the payload isn't recognizable JSON (so the caller
+ *  can fall back to plaintext rendering). */
+function parseCollabWirePayload(serialized: string): { doc: any; meta?: CollabWireMeta } | null {
   try {
     const parsed = JSON.parse(serialized);
-    if (parsed && typeof parsed === 'object' && parsed.type === 'doc') return parsed;
+    if (parsed && typeof parsed === 'object') {
+      if (parsed.__ironmic_collab__ && parsed.doc?.type === 'doc') {
+        return { doc: parsed.doc, meta: parsed.meta ?? undefined };
+      }
+      if (parsed.type === 'doc') {
+        return { doc: parsed };
+      }
+    }
   } catch { /* not JSON */ }
   return null;
 }
@@ -120,14 +152,18 @@ function tiptapJsonToPlainText(node: any): string {
   return out;
 }
 
-/** Derive a `(plainText, json)` pair from a wire payload without touching the
- *  live editor. Accepts a TipTap JSON string or a plaintext/HTML string. The
- *  json field is always a stringified TipTap doc, so the caller can persist
- *  it directly into `rawTranscriptJson` for round-trip. */
-function deriveTextAndJsonFromWire(serialized: string): { plainText: string; json: string } {
-  const doc = parseTiptapDocJson(serialized);
-  if (doc) {
-    return { plainText: tiptapJsonToPlainText(doc).trim(), json: JSON.stringify(doc) };
+/** Derive a `(plainText, json, meta?)` triple from a wire payload without
+ *  touching the live editor. Accepts wrapped JSON, bare TipTap JSON, or a
+ *  plaintext/HTML string. The json field is always a stringified TipTap doc
+ *  so the caller can persist it directly into `rawTranscriptJson`. */
+function deriveTextAndJsonFromWire(serialized: string): { plainText: string; json: string; meta?: CollabWireMeta } {
+  const wrapped = parseCollabWirePayload(serialized);
+  if (wrapped) {
+    return {
+      plainText: tiptapJsonToPlainText(wrapped.doc).trim(),
+      json: JSON.stringify(wrapped.doc),
+      meta: wrapped.meta,
+    };
   }
   // Fallback: treat as plaintext (or sloppy HTML). Strip tags for text and
   // synthesise a minimal TipTap doc so the JSON column is valid.
@@ -199,6 +235,11 @@ export function DictatePage() {
   const [collabJoined, setCollabJoined] = useState(false);
   const [collabHostName, setCollabHostName] = useState<string | null>(null);
   const [collabParticipantCount, setCollabParticipantCount] = useState(0);
+  // State mirror of collabBoundEntryIdRef so the sidebar can render the
+  // "live" green-dot indicator on the right entry. Refs don't trigger
+  // re-renders, so we keep both: the ref for hot-path checks (send/receive)
+  // and the state for declarative rendering.
+  const [collabBoundEntryId, setCollabBoundEntryId] = useState<string | null>(null);
   const collabHostActiveRef = useRef(false);
   const collabJoinedRef = useRef(false);
   const collabSelfIdRef = useRef<string | null>(null);
@@ -208,6 +249,11 @@ export function DictatePage() {
   // Derived: any kind of collab session is active.
   const collabActive = collabHostActive || collabJoined;
   const [noteEmoji, setNoteEmoji] = useState(() => pickRandomEmoji());
+  // The editor's `onUpdate` closure is captured at first mount (useEditor has
+  // no deps), so reading `noteEmoji` from there would be stale. Mirror into a
+  // ref so the collab-draft send sees the current emoji.
+  const noteEmojiRef = useRef(noteEmoji);
+  useEffect(() => { noteEmojiRef.current = noteEmoji; }, [noteEmoji]);
   /** True when we're programmatically replacing editor content (polish,
    *  toggle to other display mode, sidebar entry switch). The TipTap
    *  `onUpdate` callback short-circuits its debounced auto-save when this is
@@ -413,18 +459,31 @@ export function DictatePage() {
       // `isApplyingRemoteContentRef` early-return at the top of onUpdate
       // already gates this branch, so user keystrokes are the only thing
       // that schedule a draft.
-      if (collabHostActiveRef.current || collabJoinedRef.current) {
+      //
+      // Bound-entry guard: only broadcast when the editor is showing the
+      // shared note. Otherwise typing in an unrelated note (after the user
+      // navigated away in the sidebar) would replace peers' shared content
+      // with this note's content.
+      if (
+        (collabHostActiveRef.current || collabJoinedRef.current) &&
+        collabBoundEntryIdRef.current &&
+        collabBoundEntryIdRef.current === useDictationStore.getState().entryId
+      ) {
         if (draftThrottleRef.current) clearTimeout(draftThrottleRef.current);
         draftThrottleRef.current = setTimeout(() => {
-          const j = JSON.stringify(editor.getJSON());
+          const meta: CollabWireMeta = {
+            title: useDictationStore.getState().title ?? undefined,
+            emoji: noteEmojiRef.current ?? undefined,
+          };
+          const wire = packCollabPayload(editor.getJSON(), meta);
           const name = (() => {
             try { return localStorage.getItem('ironmic-collab-display-name') || (collabHostActiveRef.current ? 'Host' : 'Viewer'); }
             catch { return collabHostActiveRef.current ? 'Host' : 'Viewer'; }
           })();
           if (collabHostActiveRef.current) {
-            window.ironmic?.meetingCollabNotifyDraft?.(j, name)?.catch(() => {});
+            window.ironmic?.meetingCollabNotifyDraft?.(wire, name)?.catch(() => {});
           } else if (collabJoinedRef.current) {
-            window.ironmic?.meetingCollabSendDraft?.(j)?.catch(() => {});
+            window.ironmic?.meetingCollabSendDraft?.(wire)?.catch(() => {});
           }
         }, 300);
       }
@@ -559,14 +618,23 @@ export function DictatePage() {
     // the entry the collab session is bound to, so navigating to an unrelated
     // note doesn't leak its content to peers.
     if (isCurrent() && currentId && collabBoundEntryIdRef.current === currentId) {
+      const meta: CollabWireMeta = {
+        title: useDictationStore.getState().title ?? undefined,
+        emoji: noteEmoji ?? undefined,
+      };
+      // Re-pack from the just-saved JSON so the wire payload matches the DB
+      // and includes title/emoji for peers.
+      let parsedDoc: any = null;
+      try { parsedDoc = JSON.parse(json); } catch { /* fall back to bare json */ }
+      const wire = parsedDoc ? packCollabPayload(parsedDoc, meta) : json;
       if (collabHostActiveRef.current) {
         const hostName = (() => {
           try { return localStorage.getItem('ironmic-collab-display-name') || 'Host'; }
           catch { return 'Host'; }
         })();
-        window.ironmic?.meetingCollabNotifySaved?.(json, hostName)?.catch(() => {});
+        window.ironmic?.meetingCollabNotifySaved?.(wire, hostName)?.catch(() => {});
       } else if (collabJoinedRef.current) {
-        window.ironmic?.meetingCollabSaveNotes?.(json)?.catch(() => {});
+        window.ironmic?.meetingCollabSaveNotes?.(wire)?.catch(() => {});
       }
     }
   }, [noteEmoji]);
@@ -774,9 +842,12 @@ export function DictatePage() {
           // Bind to the noteId we're hosting for. F3's handlers route
           // persistence through this so navigation in the sidebar can't
           // misroute remote saves.
-          collabBoundEntryIdRef.current = info.sessionId.slice(5);
+          const boundId = info.sessionId.slice(5);
+          collabBoundEntryIdRef.current = boundId;
+          setCollabBoundEntryId(boundId);
         } else if (!info.active) {
           collabBoundEntryIdRef.current = null;
+          setCollabBoundEntryId(null);
         }
         return;
       }
@@ -796,6 +867,7 @@ export function DictatePage() {
           // Disconnected (Leave or host ended). Clear the binding so no
           // further remote events apply or persist anywhere.
           collabBoundEntryIdRef.current = null;
+          setCollabBoundEntryId(null);
           collabSelfIdRef.current = null;
           setCollabHostName(null);
         }
@@ -812,17 +884,45 @@ export function DictatePage() {
     }
   }, [collabOpen, collabHostActive, collabParticipantCount]);
 
-  /** Apply a wire payload (TipTap JSON or plaintext) to the live editor.
-   *  Returns the resulting plaintext + JSON for the caller to persist. The
-   *  isApplyingRemoteContentRef bracket suppresses onUpdate's autosave so
-   *  the remote content doesn't immediately echo back via saveContent. */
-  const applyRemoteToEditor = useCallback((serialized: string): { plainText: string; json: string } | null => {
+  // Broadcast title/emoji changes to peers even when no body text has
+  // changed. The body autosave path (saveContent) already carries meta on
+  // each save, but title/emoji edits via the header don't go through
+  // onUpdate, so without this effect peers would only see the new title
+  // after the next typing-triggered save. Use a draft (cheap, no DB hit on
+  // peers) so it lands instantly. Skip on first render (when editor is null
+  // or the binding doesn't include the current entry).
+  useEffect(() => {
+    if (!editor) return;
+    if (!(collabHostActiveRef.current || collabJoinedRef.current)) return;
+    if (!collabBoundEntryIdRef.current) return;
+    if (collabBoundEntryIdRef.current !== entryId) return;
+    const meta: CollabWireMeta = {
+      title: storeTitle ?? undefined,
+      emoji: noteEmoji ?? undefined,
+    };
+    const wire = packCollabPayload(editor.getJSON(), meta);
+    const name = (() => {
+      try { return localStorage.getItem('ironmic-collab-display-name') || (collabHostActiveRef.current ? 'Host' : 'Viewer'); }
+      catch { return collabHostActiveRef.current ? 'Host' : 'Viewer'; }
+    })();
+    if (collabHostActiveRef.current) {
+      window.ironmic?.meetingCollabNotifyDraft?.(wire, name)?.catch(() => {});
+    } else if (collabJoinedRef.current) {
+      window.ironmic?.meetingCollabSendDraft?.(wire)?.catch(() => {});
+    }
+  }, [storeTitle, noteEmoji, entryId, editor, collabHostActive, collabJoined]);
+
+  /** Apply a wire payload (wrapped JSON, bare TipTap JSON, or plaintext) to
+   *  the live editor. Returns plaintext + JSON + meta so the caller can
+   *  persist. The isApplyingRemoteContentRef bracket suppresses onUpdate's
+   *  autosave so the remote content doesn't immediately echo back. */
+  const applyRemoteToEditor = useCallback((serialized: string): { plainText: string; json: string; meta?: CollabWireMeta } | null => {
     if (!editor) return null;
+    const wrapped = parseCollabWirePayload(serialized);
     isApplyingRemoteContentRef.current = true;
     try {
-      const doc = parseTiptapDocJson(serialized);
-      if (doc) {
-        editor.commands.setContent(doc, false);
+      if (wrapped) {
+        editor.commands.setContent(wrapped.doc, false);
       } else {
         editor.commands.setContent(plainTextWireToTiptapHtml(String(serialized)), false);
       }
@@ -830,13 +930,79 @@ export function DictatePage() {
       isApplyingRemoteContentRef.current = false;
     }
     // setContent(_, false) suppresses onUpdate, so update counts manually.
-    // This does NOT re-fire the draft-send (folded into onUpdate, gated by
-    // the same isApplyingRemoteContentRef branch).
     const text = editor.getText();
     setCharCount(text.length);
     setWordCount(text.trim() ? text.trim().split(/\s+/).length : 0);
-    return { plainText: text.trim(), json: JSON.stringify(editor.getJSON()) };
+    return {
+      plainText: text.trim(),
+      json: JSON.stringify(editor.getJSON()),
+      meta: wrapped?.meta,
+    };
   }, [editor]);
+
+  /** Apply incoming title/emoji to the bound entry. When the bound entry is
+   *  the one currently loaded in the editor, mirror the change into the
+   *  dictation store + emoji state so the header re-renders immediately;
+   *  otherwise just persist (DB + entry-store cache) so the sidebar shows
+   *  the updated title/emoji without nuking what's on screen. */
+  const applyRemoteMeta = useCallback(async (targetEntryId: string, meta: CollabWireMeta | undefined) => {
+    if (!meta) return;
+    const wantedTitle = typeof meta.title === 'string' ? meta.title.trim() : null;
+    const wantedEmoji = typeof meta.emoji === 'string' ? meta.emoji : null;
+    if (!wantedTitle && !wantedEmoji) return;
+
+    // Reflect into the visible header if this is the on-screen entry.
+    if (useDictationStore.getState().entryId === targetEntryId) {
+      if (wantedTitle && useDictationStore.getState().title !== wantedTitle) {
+        useDictationStore.setState({ title: wantedTitle });
+      }
+      if (wantedEmoji && wantedEmoji !== noteEmoji) {
+        setNoteEmoji(wantedEmoji);
+      }
+    }
+
+    // Persist into the entry's tags. Read fresh tags so we don't clobber
+    // unrelated tags (notebook, status, meeting session id, etc.).
+    try {
+      const fresh = await window.ironmic.getEntry(targetEntryId);
+      if (!fresh) return;
+      let tagArr: string[] = [];
+      try {
+        const parsed = JSON.parse((fresh as any).tags || '[]');
+        if (Array.isArray(parsed)) tagArr = parsed.filter((s: any) => typeof s === 'string');
+      } catch { /* ignore */ }
+      const existingTitle = parseTitleTag((fresh as any).tags) || '';
+      const existingEmoji = parseEmojiTag((fresh as any).tags) || '';
+      const titleChanged = wantedTitle && wantedTitle !== existingTitle;
+      const emojiChanged = wantedEmoji && wantedEmoji !== existingEmoji;
+      if (!titleChanged && !emojiChanged) return;
+      if (titleChanged) {
+        tagArr = tagArr.filter((s) => !s.startsWith(TITLE_TAG_PREFIX));
+        tagArr.push(`${TITLE_TAG_PREFIX}${wantedTitle}`);
+      }
+      if (emojiChanged) {
+        tagArr = tagArr.filter((s) => !s.startsWith(EMOJI_TAG_PREFIX));
+        tagArr.push(`${EMOJI_TAG_PREFIX}${wantedEmoji}`);
+      }
+      const updated = await window.ironmic.updateEntry(targetEntryId, { tags: JSON.stringify(tagArr) } as any);
+      if (updated) {
+        useEntryStore.setState((s) => {
+          const idx = s.entries.findIndex((e) => e.id === targetEntryId);
+          const nextEntries = idx === -1 ? s.entries : (() => {
+            const out = s.entries.slice();
+            out[idx] = updated;
+            return out;
+          })();
+          const nextCache = new Map(s.entryCache);
+          nextCache.set(targetEntryId, updated);
+          return { entries: nextEntries, entryCache: nextCache };
+        });
+      }
+      try { window.dispatchEvent(new CustomEvent('ironmic:entries-changed')); } catch { /* noop */ }
+    } catch (err) {
+      console.warn('[DictatePage] failed to apply remote title/emoji:', err);
+    }
+  }, [noteEmoji]);
 
   /** Persist a received `saved` payload to the bound entry's DB row, mirror
    *  it into the entry-store cache, and refresh the sidebar. Routed by
@@ -882,26 +1048,32 @@ export function DictatePage() {
   }, [editor]);
 
   // Apply incoming live drafts. Visual-only — no DB persistence (drafts are
-  // ephemeral). Echo-guarded by peerId, not display name (RC6).
+  // ephemeral). Echo-guarded by peerId, not display name (RC6). Title/emoji
+  // meta IS applied (visual + DB) so the header re-renders even on a draft.
   useEffect(() => {
     const unsub = window.ironmic?.onMeetingCollabDraft?.((data: any) => {
       if (!editor || data?.content == null) return;
-      // Echo guard: ignore our own broadcast bouncing back through the server.
       if (collabHostActiveRef.current && data.peerId === 'host') return;
       if (data.peerId && data.peerId === collabSelfIdRef.current) return;
-      // Only apply if the bound entry is currently on screen — otherwise the
-      // draft preview would clobber whatever unrelated note the user is
-      // viewing.
+      const boundId = collabBoundEntryIdRef.current;
+      if (!boundId) return;
       const currentId = useDictationStore.getState().entryId;
-      if (collabBoundEntryIdRef.current && collabBoundEntryIdRef.current === currentId) {
-        applyRemoteToEditor(String(data.content));
+      let applied: { plainText: string; json: string; meta?: CollabWireMeta } | null = null;
+      if (boundId === currentId) {
+        applied = applyRemoteToEditor(String(data.content));
+      } else {
+        // Off-screen bound entry — still extract meta so title/emoji can sync
+        // in the sidebar even when the user is looking at a different note.
+        applied = deriveTextAndJsonFromWire(String(data.content));
       }
+      if (applied?.meta) void applyRemoteMeta(boundId, applied.meta);
     });
     return () => { unsub?.(); };
-  }, [editor, applyRemoteToEditor]);
+  }, [editor, applyRemoteToEditor, applyRemoteMeta]);
 
   // Apply incoming committed saves. Always persists to the bound entry's DB
-  // row; only updates the editor when the bound entry is on screen.
+  // row; only updates the editor when the bound entry is on screen. Title/
+  // emoji meta is also persisted so peers see consistent header info.
   useEffect(() => {
     const unsub = window.ironmic?.onMeetingCollabNotesUpdated?.((data: any) => {
       if (!editor || !data?.notes) return;
@@ -910,16 +1082,19 @@ export function DictatePage() {
       const boundId = collabBoundEntryIdRef.current;
       if (!boundId) return; // session torn down — ignore stale event
       const currentId = useDictationStore.getState().entryId;
-      let payload: { plainText: string; json: string } | null = null;
+      let payload: { plainText: string; json: string; meta?: CollabWireMeta } | null = null;
       if (boundId === currentId) {
         payload = applyRemoteToEditor(String(data.notes));
       } else {
         payload = deriveTextAndJsonFromWire(String(data.notes));
       }
-      if (payload) void persistRemoteSaved(boundId, payload);
+      if (payload) {
+        void persistRemoteSaved(boundId, payload);
+        if (payload.meta) void applyRemoteMeta(boundId, payload.meta);
+      }
     });
     return () => { unsub?.(); };
-  }, [editor, applyRemoteToEditor, persistRemoteSaved]);
+  }, [editor, applyRemoteToEditor, persistRemoteSaved, applyRemoteMeta]);
 
   const handleReadBack = useCallback(() => {
     if (!editor) return;
@@ -1440,6 +1615,7 @@ export function DictatePage() {
         refreshSignal={sidebarRefresh}
         collapsed={notesSidebarCollapsed}
         onToggleCollapsed={toggleNotesSidebar}
+        liveCollabEntryId={collabBoundEntryId}
       />
 
       {/* Right: the note editor */}
@@ -1789,22 +1965,33 @@ export function DictatePage() {
       {collabOpen && (
         <NotesCollaborateModal
           noteId={entryId}
-          // Seed the host's session with rich JSON so late joiners get
-          // formatting via the welcome message.
-          initialNotes={editor ? JSON.stringify(editor.getJSON()) : ''}
+          // Seed the host's session with the wrapped wire payload (doc + meta)
+          // so late joiners get formatting AND the host's title/emoji via the
+          // welcome message. The server stores this string verbatim and
+          // forwards it on every join, and our parser unwraps it transparently.
+          initialNotes={editor
+            ? packCollabPayload(editor.getJSON(), {
+                title: useDictationStore.getState().title ?? undefined,
+                emoji: noteEmoji ?? undefined,
+              })
+            : ''}
           onJoined={async ({ sessionId, hostName, notes }) => {
-            // 1. Derive plaintext + canonical JSON from the seeded notes
-            //    WITHOUT touching the live editor — if createEntry fails,
-            //    the user's currently-open note must stay untouched.
+            // 1. Derive plaintext + canonical JSON + meta from the seeded
+            //    notes WITHOUT touching the live editor — if createEntry
+            //    fails, the user's currently-open note must stay untouched.
             const derived = deriveTextAndJsonFromWire(String(notes ?? ''));
 
             // 2. Create a brand-new entry already populated with the seeded
             //    content. Never overwrite the collaborator's existing note.
+            //    Adopt the host's title/emoji when available so the new
+            //    entry mirrors what the host is showing.
+            const seedTitle = derived.meta?.title?.trim() || `Shared with ${hostName}`;
+            const seedEmoji = derived.meta?.emoji || noteEmoji;
             const tagsArr = [
-              `${TITLE_TAG_PREFIX}Shared with ${hostName}`,
+              `${TITLE_TAG_PREFIX}${seedTitle}`,
               `__notebook__:${notebookId}`,
               `__status__:draft`,
-              `${EMOJI_TAG_PREFIX}${noteEmoji}`,
+              `${EMOJI_TAG_PREFIX}${seedEmoji}`,
               `__collab_session__:${sessionId}`,
             ];
             let created: any;
@@ -1828,12 +2015,13 @@ export function DictatePage() {
             // 3. Bind the session to this entry. F2/F3 route persistence
             //    here so sidebar navigation can't misroute remote saves.
             collabBoundEntryIdRef.current = newId;
+            setCollabBoundEntryId(newId);
 
             // 4. Load the freshly-created entry through the canonical helper
             //    so all bookkeeping (counts, status, emoji, store, draft) runs.
             try {
               const fresh = await window.ironmic.getEntry(newId);
-              if (fresh) loadEntryIntoEditor(fresh, { titleOverride: `Shared with ${hostName}` });
+              if (fresh) loadEntryIntoEditor(fresh, { titleOverride: seedTitle });
             } catch (err) {
               console.warn('[DictatePage] could not reload joined-collab entry:', err);
             }
