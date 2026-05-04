@@ -174,6 +174,7 @@ declare global {
       // Meeting Recording (Granola-style chunk loop)
       meetingStartRecording: (sessionId: string, deviceName?: string | null, chunkIntervalS?: number) => Promise<void>;
       meetingStopRecording: () => Promise<any>;
+      meetingSetMicMuted: (sessionId: string, muted: boolean) => Promise<void>;
       notifyMeetingUserNotesChanged: (sessionId: string) => void;
       // Streaming dictation (near-real-time chunked transcription)
       dictationStreamStart: () => Promise<void>;

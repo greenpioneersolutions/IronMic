@@ -77,6 +77,9 @@ const ALLOWED_SETTING_KEYS = new Set([
   // Claude/Copilot CLIs; default 'false' keeps polish strictly on-device.
   // The renderer Settings panel surfaces this with a privacy warning + confirm.
   'polish_allow_cloud',
+  // Developer features escape hatch. 'true' surfaces legacy/experimental
+  // controls (e.g. Solo meeting mode). Default 'false'.
+  'dev_features_enabled',
 ]);
 
 function assertString(val: unknown, name: string): asserts val is string {
@@ -938,6 +941,15 @@ If the text is too short or unclear, output: ["General"]`;
   ipcMain.handle('ironmic:get-meeting-recording-state', () =>
     meetingRecorder.getState(),
   );
+
+  // Self-mute toggle for the active meeting. The renderer passes the
+  // sessionId it thinks is active so we can reject stale events from a
+  // previous meeting. Recorder validates against its internal state.sessionId.
+  ipcMain.handle(IPC_CHANNELS.MEETING_SET_MIC_MUTED, (_event, sessionId: string, muted: boolean) => {
+    assertString(sessionId, 'sessionId');
+    if (typeof muted !== 'boolean') throw new Error('muted must be a boolean');
+    meetingRecorder.setMicMuted(sessionId, muted);
+  });
 
   // ── Streaming dictation (near-real-time, chunked) ──
   ipcMain.handle(IPC_CHANNELS.DICTATION_STREAM_START, async () => {

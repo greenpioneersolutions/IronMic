@@ -12,7 +12,7 @@ import {
   Cpu, Database, BookOpen, Lock, ClipboardCheck, Eye, EyeOff,
   Clock, AlertTriangle, CheckCircle, Info, Wifi, WifiOff, FileWarning,
   Trash2, HardDrive, Sparkles, RefreshCw, Download, Brain,
-  Mic, Route, Users, Search, Bell, Workflow, Sliders,
+  Mic, Route, Users, Search, Bell, Workflow, Sliders, FlaskConical,
 } from 'lucide-react';
 
 type SettingsTab = 'general' | 'audio' | 'speech' | 'ai' | 'models' | 'data' | 'security' | 'voice-ai';
@@ -781,6 +781,7 @@ function SecuritySettings() {
   const [allowCloudPolish, setAllowCloudPolish] = useState(false);
   const [proxyUrl, setProxyUrl] = useState('');
   const [proxySaved, setProxySaved] = useState(false);
+  const [devFeaturesEnabled, setDevFeaturesEnabled] = useState(false);
 
   useEffect(() => {
     loadSecuritySettings();
@@ -788,7 +789,7 @@ function SecuritySettings() {
 
   async function loadSecuritySettings() {
     const api = window.ironmic;
-    const [clip, timeout, exit, aiConfirm, privacy, pEnabled, pUrl, polishCloud] = await Promise.all([
+    const [clip, timeout, exit, aiConfirm, privacy, pEnabled, pUrl, polishCloud, devFeatures] = await Promise.all([
       api.getSetting('security_clipboard_auto_clear'),
       api.getSetting('security_session_timeout'),
       api.getSetting('security_clear_on_exit'),
@@ -797,6 +798,7 @@ function SecuritySettings() {
       api.getSetting('proxy_enabled'),
       api.getSetting('proxy_url'),
       api.getSetting('polish_allow_cloud'),
+      api.getSetting('dev_features_enabled'),
     ]);
     if (clip) setClipboardAutoClear(clip);
     if (timeout) setSessionTimeout(timeout);
@@ -806,6 +808,7 @@ function SecuritySettings() {
     setProxyEnabled(pEnabled === 'true');
     if (pUrl) setProxyUrl(pUrl);
     setAllowCloudPolish(polishCloud === 'true');
+    setDevFeaturesEnabled(devFeatures === 'true');
   }
 
   /** Confirm before turning on cloud polish — it's the one setting that
@@ -1065,6 +1068,22 @@ function SecuritySettings() {
           </div>
         </div>
       </Card>
+
+      {/* Developer features (last subsection — gated experimental controls) */}
+      <div className="pt-2">
+        <p className="text-xs font-semibold text-iron-text-muted uppercase tracking-wider mb-2">Developer</p>
+        <SettingRow
+          icon={FlaskConical}
+          title="Developer features"
+          description="Exposes legacy and experimental controls (Solo meeting mode, etc.). Off by default."
+          control={
+            <Toggle
+              checked={devFeaturesEnabled}
+              onChange={(v) => { setDevFeaturesEnabled(v); updateSetting('dev_features_enabled', String(v)); }}
+            />
+          }
+        />
+      </div>
     </>
   );
 }

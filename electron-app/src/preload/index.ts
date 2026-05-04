@@ -213,6 +213,11 @@ const api = {
   meetingStartRecording: (sessionId: string, deviceName?: string | null, chunkIntervalS?: number) =>
     ipcRenderer.invoke('ironmic:meeting-start-recording', sessionId, deviceName, chunkIntervalS),
   meetingStopRecording: () => ipcRenderer.invoke('ironmic:meeting-stop-recording'),
+  /** Toggle self-mute during an active meeting. Backend is the source of
+   *  truth — the renderer should mirror state via onMeetingRecordingState
+   *  rather than flipping its store optimistically. */
+  meetingSetMicMuted: (sessionId: string, muted: boolean) =>
+    ipcRenderer.invoke('ironmic:meeting-set-mic-muted', sessionId, muted),
 
   // ── Streaming dictation (near-real-time) ──
   dictationStreamStart: () => ipcRenderer.invoke('ironmic:dictation-stream-start'),

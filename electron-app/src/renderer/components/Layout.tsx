@@ -85,6 +85,16 @@ export function Layout() {
     // Debounce: ignore presses while the pipeline is winding down.
     if (status === 'stopping') return;
 
+    // Meeting takes precedence over dictation: if a meeting is currently
+    // recording (or its notes are still generating), the mic shield is the
+    // user's "take me back to my meeting" affordance — never start a new
+    // dictation on top of an active meeting.
+    const meetingState = useMeetingStore.getState();
+    if (meetingState.isGranolaRecording || meetingState.isGranolaStopping) {
+      if (currentPage !== 'meetings') setPage('meetings');
+      return;
+    }
+
     if (status === 'recording') {
       // Stop the active recording. Never set newNoteRequested here — that
       // would wipe the in-flight note when the user is just trying to stop.
@@ -366,7 +376,7 @@ export function Layout() {
 
         {/* Content */}
         <div className="flex-1 overflow-hidden">
-          {page === 'home' && <WelcomePage onNavigate={handleNavigate} />}
+          {page === 'home' && <WelcomePage onNavigate={handleNavigate} onQuickDictate={handleRecord} />}
           {page === 'main' && (
             <ErrorBoundary label="Timeline">
               <Timeline />

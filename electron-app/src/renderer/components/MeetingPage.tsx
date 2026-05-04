@@ -7,10 +7,9 @@ import { MeetingTranscriptPanel } from './MeetingTranscriptPanel';
 import { MeetingNotesPanel } from './MeetingNotesPanel';
 import { YourNotesPanel, type YourNotesPanelHandle } from './YourNotesPanel';
 import { MeetingDetailPage } from './MeetingDetailPage';
-import { MeetingSharedNotesViewer } from './MeetingSharedNotesViewer';
-import type { CollabParticipant } from './MeetingCollaboratePanel';
 import { AudioModeSelector } from './AudioModeSelector';
 import { MeetingRoomPanel } from './MeetingRoomPanel';
+import { InviteDetailsPanel } from './InviteDetailsPanel';
 import { useMeetingStore } from '../stores/useMeetingStore';
 import { meetingDetector, type MeetingState, type MeetingResult } from '../services/tfjs/MeetingDetector';
 import type { MeetingTemplate, StructuredMeetingOutput } from '../services/tfjs/MeetingTemplateEngine';
@@ -35,6 +34,7 @@ export function MeetingPage() {
     processingMeetings, markMeetingProcessing, unmarkMeetingProcessing,
     roomMode, setRoomMode, roomDisplayName, setRoomDisplayName,
     roomError, setRoomError, applyRoomState, applyParticipantUpdate, resetRoomState,
+    isMicMuted, setIsMicMuted,
   } = useMeetingStore();
 
   // Join-room form state
@@ -49,21 +49,6 @@ export function MeetingPage() {
   const [showEditor, setShowEditor] = useState(false);
   const [durationMs, setDurationMs] = useState(0);
   const [detailSessionId, setDetailSessionId] = useState<string | null>(null);
-  /** When set, open detail page with collab panel pre-opened (from Share icon) */
-  const [collaborateSessionId, setCollaborateSessionId] = useState<string | null>(null);
-
-  // ── Shared notes viewer (participant joining a host's notes collab) ──
-  const [sharedNotesData, setSharedNotesData] = useState<{
-    hostName: string | null;
-    notes: string;
-    participants: CollabParticipant[];
-  } | null>(null);
-
-  // Join shared notes form
-  const [joinCollabInvite, setJoinCollabInvite] = useState('');
-  const [joinCollabName, setJoinCollabName] = useState('');
-  const [joinCollabError, setJoinCollabError] = useState<string | null>(null);
-  const [joiningCollab, setJoiningCollab] = useState(false);
 
   // Granola mode — current notes (session ID lives in Zustand to survive tab switches)
   const [granolaStructuredOutput, setGranolaStructuredOutput] = useState<StructuredMeetingOutput | null>(null);
@@ -91,6 +76,15 @@ export function MeetingPage() {
   // Cleared on leave/end.
   const [welcomeNotesHtml, setWelcomeNotesHtml] = useState<string | undefined>(undefined);
 
+  // Developer features escape hatch (Settings → Security & Privacy → Developer).
+  // When false (default), Solo mode is hidden and an active Solo selection is
+  // silently snapped to Host on mount. Source of truth is the SQLite setting.
+  const [devFeaturesEnabled, setDevFeaturesEnabled] = useState(false);
+
+  // Whether the host's invite-details panel is shown during a live host meeting.
+  // Toggled by the in-toolbar Collaborate button. View-local; not persisted.
+  const [showInviteDetails, setShowInviteDetails] = useState(true);
+
   // ── Granola mode: subscribe to live segment push events ──
   useEffect(() => {
     const unsubSegment = window.ironmic?.onMeetingSegmentReady?.((segment: TranscriptSegment) => {
@@ -105,6 +99,10 @@ export function MeetingPage() {
       // Mirror the recorder's streamingMode so the empty-state copy and any
       // future UI affordances can branch on it. Defaults to false on idle.
       setStreamingMode(!!state.streamingMode && state.status === 'recording');
+      // Mirror backend self-mute. Backend is source of truth — we never flip
+      // isMicMuted optimistically; the renderer's toolbar button calls IPC
+      // and waits for the recording-state event to update the store.
+      setIsMicMuted(!!state.isMicMuted);
       if (state.status === 'recording') {
         // Keep Zustand store in sync with the backend on every push event.
         // This is the recovery path: if the component remounted (tab switch)
@@ -222,55 +220,28 @@ export function MeetingPage() {
     };
   }, []);
 
-  // ── Load saved collab display name ──
+  // ── Reset invite-details visibility on each recording start ──
+  // Default to "shown" for every new meeting; the user explicitly hides it
+  // via the Collaborate button if they want it off-screen during a share.
   useEffect(() => {
-    window.ironmic?.getSetting?.('meeting_collab_display_name')
-      .then((v) => { if (v) setJoinCollabName(v); })
+    if (isGranolaRecording) setShowInviteDetails(true);
+  }, [isGranolaRecording]);
+
+  // ── Load dev_features_enabled and snap legacy Solo → Host when off ──
+  // Runs on mount (i.e. every time the user navigates to the Meetings page),
+  // so toggling the setting in another tab takes effect on next visit without
+  // any cross-component event plumbing.
+  useEffect(() => {
+    window.ironmic?.getSetting?.('dev_features_enabled')
+      .then((v) => {
+        const enabled = v === 'true';
+        setDevFeaturesEnabled(enabled);
+        if (!enabled && useMeetingStore.getState().roomMode === 'solo') {
+          setRoomMode('host');
+        }
+      })
       .catch(() => {});
-  }, []);
-
-  // ── Join shared notes handler ──
-  const parseCollabInvite = (raw: string): { ip: string; port: number; code: string } | null => {
-    const parts = raw.trim().split(/[|\s]+/).filter(Boolean);
-    if (parts.length < 2) return null;
-    const [addr, code] = parts;
-    const [ip, portStr] = addr.split(':');
-    const port = Number(portStr);
-    if (!ip || !Number.isFinite(port) || port <= 0 || !code) return null;
-    return { ip, port, code: code.toUpperCase() };
-  };
-
-  const handleJoinSharedNotes = useCallback(async () => {
-    const parsed = parseCollabInvite(joinCollabInvite);
-    if (!parsed) {
-      setJoinCollabError('Invalid invite string. Expected format: 192.168.x.x:PORT|CODE');
-      return;
-    }
-    const displayName = joinCollabName.trim() || 'Viewer';
-    setJoinCollabError(null);
-    setJoiningCollab(true);
-    try {
-      // Persist display name
-      window.ironmic?.setSetting?.('meeting_collab_display_name', displayName).catch(() => {});
-      const result = await window.ironmic.meetingCollabJoin({
-        hostIp: parsed.ip,
-        hostPort: parsed.port,
-        sessionCode: parsed.code,
-        displayName,
-      });
-      const { info, notes } = result as any;
-      setSharedNotesData({
-        hostName: info?.hostName ?? null,
-        notes: notes ?? '',
-        participants: info?.participants ?? [],
-      });
-      setJoinCollabInvite('');
-    } catch (err: any) {
-      setJoinCollabError(err?.message ?? 'Could not connect to shared session');
-    } finally {
-      setJoiningCollab(false);
-    }
-  }, [joinCollabInvite, joinCollabName]);
+  }, [setRoomMode]);
 
   // ── Legacy ambient meeting detector + startup recovery ──
   useEffect(() => {
@@ -600,13 +571,6 @@ export function MeetingPage() {
           await generateStructuredNotes(sessionId, fullTranscript, durationSec, templateSnapshot);
         }
 
-        // After notes are generated: if this was a hosted room, automatically open
-        // the detail page with the Collaborate panel pre-opened. The host's
-        // participants are already present on the LAN and are waiting to review/edit
-        // the notes — this shortcut saves them having to navigate to the Share menu.
-        if (roomModeSnapshot === 'host') {
-          setCollaborateSessionId(sessionId);
-        }
       } catch (err) {
         console.error('[MeetingPage] Background stop pipeline failed:', err);
       } finally {
@@ -967,27 +931,13 @@ export function MeetingPage() {
 
   const isActive = isGranolaRecording || meetingState !== 'idle';
 
-  // ── Shared notes viewer (participant) ──
-  if (sharedNotesData) {
-    return (
-      <MeetingSharedNotesViewer
-        hostName={sharedNotesData.hostName}
-        initialNotes={sharedNotesData.notes}
-        participants={sharedNotesData.participants}
-        onLeave={() => setSharedNotesData(null)}
-      />
-    );
-  }
-
-  // ── Meeting detail view (opened from history, optionally with collab panel) ──
-  if ((detailSessionId || collaborateSessionId) && !isActive) {
-    const sid = collaborateSessionId ?? detailSessionId!;
+  // ── Meeting detail view (opened from history) ──
+  if (detailSessionId && !isActive) {
     return (
       <MeetingDetailPage
-        sessionId={sid}
-        onBack={() => { setDetailSessionId(null); setCollaborateSessionId(null); }}
+        sessionId={detailSessionId}
+        onBack={() => setDetailSessionId(null)}
         onUpdated={loadSessions}
-        openCollabOnMount={collaborateSessionId !== null}
       />
     );
   }
@@ -1014,13 +964,54 @@ export function MeetingPage() {
             )}
           </div>
           {isGranolaRecording && (
-            <button
-              onClick={handleGranolaStop}
-              className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium bg-red-500/15 text-red-400 rounded-lg border border-red-500/20 hover:bg-red-500/25 transition-colors"
-            >
-              <MicOff className="w-3.5 h-3.5" />
-              {roomMode === 'participant' ? 'Leave Room' : 'End Meeting'}
-            </button>
+            <div className="flex items-center gap-2">
+              {/* Mic on/off — privacy boundary. When muted: no local STT, no
+                  segment broadcast, no final-drain on stop. Backend is source
+                  of truth; we only invoke the IPC and the state event flips
+                  the store. */}
+              <button
+                onClick={async () => {
+                  if (!granolaSessionId) return;
+                  try {
+                    await window.ironmic.meetingSetMicMuted(granolaSessionId, !isMicMuted);
+                  } catch (err) {
+                    console.warn('[MeetingPage] meetingSetMicMuted failed:', err);
+                  }
+                }}
+                disabled={!granolaSessionId}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  isMicMuted
+                    ? 'bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25'
+                    : 'text-iron-text-muted border-iron-border hover:bg-iron-surface-hover'
+                }`}
+                title={isMicMuted ? 'Unmute microphone' : 'Mute microphone'}
+              >
+                {isMicMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                {isMicMuted ? 'Mic off' : 'Mic on'}
+              </button>
+              {/* Collaborate toggle — host only. Hides/shows the invite block
+                  (IP/port/code) so it can be kept off-screen during a share. */}
+              {roomMode === 'host' && (
+                <button
+                  onClick={() => setShowInviteDetails(v => !v)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border transition-colors ${
+                    showInviteDetails
+                      ? 'bg-iron-accent/15 text-iron-accent-light border-iron-accent/20'
+                      : 'text-iron-text-muted border-iron-border hover:bg-iron-surface-hover'
+                  }`}
+                  title={showInviteDetails ? 'Hide invite details' : 'Show invite details'}
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  Collaborate
+                </button>
+              )}
+              <button
+                onClick={handleGranolaStop}
+                className="px-3 py-1.5 text-xs font-medium bg-red-500/15 text-red-400 rounded-lg border border-red-500/20 hover:bg-red-500/25 transition-colors"
+              >
+                {roomMode === 'participant' ? 'Leave Room' : 'End Meeting'}
+              </button>
+            </div>
           )}
         </div>
 
@@ -1053,6 +1044,7 @@ export function MeetingPage() {
                 )}
               </div>
               <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+                {roomMode === 'host' && showInviteDetails && <InviteDetailsPanel />}
                 {roomMode !== 'solo' && <MeetingRoomPanel />}
                 {isGranolaRecording ? (
                   <div className="bg-iron-surface border border-iron-border rounded-lg p-3">
@@ -1235,9 +1227,8 @@ export function MeetingPage() {
             {meetingState === 'listening' && (
               <button
                 onClick={handleLegacyStop}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-medium bg-red-500/15 text-red-400 rounded-lg border border-red-500/20 hover:bg-red-500/25 transition-colors"
+                className="px-4 py-2 text-xs font-medium bg-red-500/15 text-red-400 rounded-lg border border-red-500/20 hover:bg-red-500/25 transition-colors"
               >
-                <MicOff className="w-3.5 h-3.5" />
                 End Meeting
               </button>
             )}
@@ -1248,14 +1239,16 @@ export function MeetingPage() {
       {/* Setup: template picker + audio device (when idle) */}
       {!isActive && (
         <div className="space-y-3">
-          {/* Mode selector: Solo / Host a Room / Join a Room */}
+          {/* Mode selector: Host a Room / Join a Room (+ Solo when dev features enabled) */}
           <div>
             <p className="text-[11px] font-semibold text-iron-text-muted uppercase tracking-wider mb-2">Mode</p>
-            <div className="grid grid-cols-3 gap-2">
+            <div className={`grid gap-2 ${devFeaturesEnabled ? 'grid-cols-3' : 'grid-cols-2'}`}>
               {[
-                { key: 'solo', label: 'Solo', icon: <Mic className="w-3.5 h-3.5" /> },
                 { key: 'host', label: 'Host Room', icon: <Wifi className="w-3.5 h-3.5" /> },
                 { key: 'participant', label: 'Join Room', icon: <LogIn className="w-3.5 h-3.5" /> },
+                ...(devFeaturesEnabled
+                  ? [{ key: 'solo', label: 'Solo', icon: <Mic className="w-3.5 h-3.5" /> }]
+                  : []),
               ].map(opt => (
                 <button
                   key={opt.key}
@@ -1298,8 +1291,11 @@ export function MeetingPage() {
               <input
                 type="text"
                 value={joinInviteRaw}
-                onChange={(e) => setJoinInviteRaw(e.target.value)}
+                onChange={(e) => setJoinInviteRaw(e.target.value.toUpperCase())}
                 placeholder="Paste invite: 192.168.1.12:54821|ABC234"
+                autoCapitalize="characters"
+                autoComplete="off"
+                spellCheck={false}
                 className="w-full px-3 py-2 text-xs font-mono bg-iron-surface text-iron-text rounded-lg border border-iron-border focus:outline-none focus:border-iron-accent/40"
               />
               <p className="text-[10px] text-iron-text-muted text-center">— or enter manually —</p>
@@ -1309,6 +1305,8 @@ export function MeetingPage() {
                   value={joinIp}
                   onChange={(e) => setJoinIp(e.target.value)}
                   placeholder="Host IP"
+                  autoComplete="off"
+                  spellCheck={false}
                   className="px-2 py-1.5 text-xs font-mono bg-iron-surface text-iron-text rounded-lg border border-iron-border focus:outline-none focus:border-iron-accent/40"
                 />
                 <input
@@ -1316,6 +1314,8 @@ export function MeetingPage() {
                   value={joinPort}
                   onChange={(e) => setJoinPort(e.target.value.replace(/[^0-9]/g, ''))}
                   placeholder="Port"
+                  autoComplete="off"
+                  spellCheck={false}
                   className="px-2 py-1.5 text-xs font-mono bg-iron-surface text-iron-text rounded-lg border border-iron-border focus:outline-none focus:border-iron-accent/40"
                 />
                 <input
@@ -1324,6 +1324,9 @@ export function MeetingPage() {
                   onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
                   placeholder="Code"
                   maxLength={6}
+                  autoCapitalize="characters"
+                  autoComplete="off"
+                  spellCheck={false}
                   className="px-2 py-1.5 text-xs font-mono bg-iron-surface text-iron-text rounded-lg border border-iron-border focus:outline-none focus:border-iron-accent/40 tracking-widest"
                 />
               </div>
@@ -1462,53 +1465,6 @@ export function MeetingPage() {
         </Card>
       )}
 
-      {/* Join Shared Notes section */}
-      <div className="border border-iron-border/60 rounded-xl p-3 space-y-2 bg-iron-surface/50">
-        <div className="flex items-center gap-2">
-          <Share2 className="w-3.5 h-3.5 text-iron-text-muted" />
-          <p className="text-[11px] font-semibold text-iron-text-muted uppercase tracking-wider">
-            Join Shared Notes
-          </p>
-        </div>
-        <p className="text-[10px] text-iron-text-muted">
-          Paste an invite code from a colleague to view and edit their meeting notes.
-        </p>
-        <input
-          type="text"
-          value={joinCollabName}
-          onChange={(e) => setJoinCollabName(e.target.value)}
-          placeholder="Your display name"
-          maxLength={64}
-          className="w-full px-3 py-2 text-sm bg-iron-surface text-iron-text rounded-lg border border-iron-border focus:outline-none focus:border-iron-accent/40"
-        />
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={joinCollabInvite}
-            onChange={(e) => { setJoinCollabInvite(e.target.value.toUpperCase()); setJoinCollabError(null); }}
-            onKeyDown={(e) => e.key === 'Enter' && handleJoinSharedNotes()}
-            placeholder="192.168.X.X:PORT|CODE"
-            className="flex-1 px-3 py-2 text-xs font-mono bg-iron-surface text-iron-text rounded-lg border border-iron-border focus:outline-none focus:border-iron-accent/40"
-            autoCapitalize="characters"
-            autoCorrect="off"
-            spellCheck={false}
-          />
-          <button
-            onClick={handleJoinSharedNotes}
-            disabled={joiningCollab || !joinCollabInvite.trim()}
-            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-iron-accent/10 text-iron-accent-light border border-iron-accent/20 rounded-lg hover:bg-iron-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-          >
-            {joiningCollab
-              ? <><span className="w-3 h-3 rounded-full border-2 border-iron-accent-light/50 border-t-iron-accent-light animate-spin" />Joining…</>
-              : <><LogIn className="w-3 h-3" />Open Notes</>
-            }
-          </button>
-        </div>
-        {joinCollabError && (
-          <p className="text-[10px] text-red-400">{joinCollabError}</p>
-        )}
-      </div>
-
       {/* Meeting history */}
       {sessions.length > 0 && (
         <div className="space-y-2">
@@ -1519,10 +1475,6 @@ export function MeetingPage() {
               session={s}
               onDelete={deleteSession}
               onOpen={() => setDetailSessionId(s.id)}
-              onCollaborate={(id) => {
-                // Open the detail page with the collaborate panel pre-opened
-                setCollaborateSessionId(id);
-              }}
             />
           ))}
         </div>

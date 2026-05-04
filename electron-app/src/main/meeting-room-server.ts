@@ -550,6 +550,14 @@ class MeetingRoomServerManager {
   private broadcastSegment(seg: TranscriptSegment): void {
     // Don't loop-broadcast segments that originated from a remote participant.
     if (seg.source.startsWith('participant:')) return;
+    // Privacy backstop: if the host is self-muted, suppress outbound broadcast
+    // of the host's own mic-derived segments. The audio gate inside
+    // MeetingRecorder normally prevents these segments from existing in the
+    // first place; this is defense-in-depth in case a segment was already
+    // committed before the mute toggle was observed by the streaming loop.
+    // Remote-participant segments (handled above by the source check) are
+    // unaffected — host mute must never silence what other people say.
+    if (meetingRecorder.isMicMuted()) return;
     this.broadcast({ type: 'segment_broadcast', segment: seg });
   }
 

@@ -21,6 +21,8 @@ interface ModelInfo {
 
 interface WelcomePageProps {
   onNavigate: (page: string) => void;
+  /** Fresh-note + auto-start-dictation, mirroring the top-left mic shield. */
+  onQuickDictate: () => void;
 }
 
 type ResultType = 'dictation' | 'ai-session' | 'note';
@@ -34,7 +36,7 @@ interface SearchResult {
   sessionId?: string;
 }
 
-export function WelcomePage({ onNavigate }: WelcomePageProps) {
+export function WelcomePage({ onNavigate, onQuickDictate }: WelcomePageProps) {
   const [models, setModels] = useState<Record<string, ModelInfo>>({});
   // null = still loading; distinguishes "loading" from "definitely missing"
   // so the warning block doesn't flash during first paint. Bundled Moonshine
@@ -221,7 +223,7 @@ export function WelcomePage({ onNavigate }: WelcomePageProps) {
                 step={1}
                 title="Try your first dictation"
                 description={`Press ${hotkey} from anywhere on your computer, speak, then press it again. Your speech is transcribed and copied to your clipboard — ready to paste.`}
-                action={engineReady ? { label: 'Open Dictate', onClick: () => onNavigate('dictate') } : undefined}
+                action={engineReady ? { label: 'Open Dictate', onClick: onQuickDictate } : undefined}
                 done={hasContent}
                 disabled={!engineReady}
               />
@@ -380,7 +382,7 @@ export function WelcomePage({ onNavigate }: WelcomePageProps) {
               {isFirstTime ? 'Features' : 'Quick Start'}
             </h2>
             <div className="grid grid-cols-2 gap-3">
-              <QuickAction icon={Mic} title="Dictate" description={`Press ${hotkey} anywhere to record`} onClick={() => onNavigate('dictate')} color="accent" disabled={!engineReady} />
+              <QuickAction icon={Mic} title="Dictate" description={`Press ${hotkey} anywhere to record`} onClick={onQuickDictate} color="accent" disabled={!engineReady} />
               <QuickAction icon={Sparkles} title="AI Assistant" description="Chat with a local AI" onClick={() => onNavigate('ai')} color="purple" />
               <QuickAction icon={Volume2} title="Listen" description="Hear text read aloud" onClick={() => onNavigate('listen')} color="emerald" disabled={!models.tts?.downloaded} />
               <QuickAction icon={Brain} title="Notes" description="Organize thoughts in notebooks" onClick={() => onNavigate('notes')} color="amber" />

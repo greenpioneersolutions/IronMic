@@ -291,6 +291,10 @@ class MeetingRoomClientManager {
     // Don't forward segments we received via broadcast (would loop)
     if (seg.source === 'broadcast') return;
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    // Privacy backstop: if this participant is self-muted, suppress outbound
+    // mic-derived segments to the host. The recorder's audio gate normally
+    // prevents the segment from being produced; this is defense-in-depth.
+    if (meetingRecorder.isMicMuted()) return;
     try {
       this.socket.send(JSON.stringify({
         type: 'segment',
