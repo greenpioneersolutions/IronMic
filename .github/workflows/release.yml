@@ -32,19 +32,23 @@ jobs:
         run: |
           sudo apt-get update
           # Audio (cpal/ALSA) + X11 display (uiohook-napi keyboard hook)
-          # uiohook builds libuiohook from source via node-gyp and requires:
-          #   libx11-dev    — X11/keysym.h, Xlib headers
-          #   libxtst-dev   — XTest extension (synthetic key/mouse events)
-          #   libxinerama-dev — multi-monitor support
-          #   libxrandr-dev — screen resolution queries
-          # Without these the @electron/rebuild step fails with
-          # "fatal error: X11/keysym.h: No such file or directory".
+          # uiohook-napi compiles libuiohook from source via node-gyp.
+          # Its binding.gyp for Linux defines USE_XRANDR, USE_EVDEV, USE_XT
+          # and links: -lX11 -lXrandr -lXtst -lXt -lpthread
+          #
+          #   libx11-dev    — Xlib / X11/*.h headers (-lX11)
+          #   libxtst-dev   — XTest + record extensions (-lXtst)
+          #   libxrandr-dev — RandR extension headers (-lXrandr)
+          #   libxt-dev     — X Toolkit Intrinsics / X11/Intrinsic.h (-lXt)
+          #                   USE_XT is always defined on Linux; without this
+          #                   package the build fails:
+          #                   "fatal error: X11/Intrinsic.h: No such file"
           sudo apt-get install -y \
             libasound2-dev \
             libx11-dev \
             libxtst-dev \
-            libxinerama-dev \
-            libxrandr-dev
+            libxrandr-dev \
+            libxt-dev
 
       - name: Build Rust addon
         shell: bash
