@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { basename, join } from 'path';
 import type { ICLIAdapter, AIProvider, AIModel, ParsedOutput } from './types';
@@ -189,18 +189,26 @@ export class CopilotAdapter implements ICLIAdapter {
     // Documented env precedence: COPILOT_GITHUB_TOKEN > GH_TOKEN > GITHUB_TOKEN.
     if (env.COPILOT_GITHUB_TOKEN || env.GH_TOKEN || env.GITHUB_TOKEN) return true;
 
+    const copilotHome = env.COPILOT_HOME || join(homedir(), '.copilot');
+
+    // Current @github/copilot builds (2026+) store auth in session-store.db
+    // (a SQLite file). A non-trivial file size means the user has logged in
+    // and has active sessions. This is the primary auth signal on modern installs.
     try {
-      // COPILOT_HOME overrides the default ~/.copilot config directory.
-      const copilotHome = env.COPILOT_HOME || join(homedir(), '.copilot');
+      const dbPath = join(copilotHome, 'session-store.db');
+      if (existsSync(dbPath) && statSync(dbPath).size > 1024) return true;
+    } catch { /* ignore */ }
+
+    // Older builds wrote loggedInUsers (camelCase) or logged_in_users
+    // (snake_case) to config.json. Check as a fallback.
+    try {
       const configPath = join(copilotHome, 'config.json');
       const parsed = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
-      // Current @github/copilot builds write `loggedInUsers` (camelCase);
-      // older builds wrote `logged_in_users`. Accept both.
       const users = parsed.loggedInUsers ?? parsed.logged_in_users;
-      return Array.isArray(users) && users.length > 0;
-    } catch {
-      return false;
-    }
+      if (Array.isArray(users) && users.length > 0) return true;
+    } catch { /* ignore */ }
+
+    return false;
   }
 
   private isGhAuthenticated(binaryPath: string): boolean {
