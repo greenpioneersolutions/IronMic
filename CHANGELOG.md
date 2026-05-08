@@ -2,6 +2,16 @@
 
 All notable changes to IronMic will be documented in this file.
 
+## [1.7.2] - 2026-05-08
+
+### Fixed
+
+- **GitHub Copilot auth on Windows** — Settings always showed "not logged in" for Copilot on current `@github/copilot` CLI builds because the adapter read `logged_in_users` (snake_case) while modern builds write `loggedInUsers` (camelCase). Both keys are now accepted.
+- **Copilot auth env precedence** — `COPILOT_GITHUB_TOKEN` is now checked before `GH_TOKEN` / `GITHUB_TOKEN`, matching GitHub's documented precedence. `COPILOT_HOME` is honoured so non-default config directories are found correctly.
+- **Copilot subprocess env** — The spawned `copilot` process now receives `COPILOT_GITHUB_TOKEN`, `COPILOT_HOME`, and `COPILOT_GH_HOST` in its environment so env-based auth reaches the CLI.
+- **Copilot chat stateless** — Every turn was starting a fresh session. `--continue` is now passed after the first successful turn so multi-turn conversations have memory. `-s` (silent mode) added for clean programmatic output.
+- **Per-provider turn counts** — A shared turn counter across Claude, Copilot, and local meant switching provider tabs could incorrectly send `--continue` on a brand-new Copilot session. Counts are now tracked per-provider and only incremented on a clean exit code 0 response.
+
 ## [1.6.0] - 2026-05-04
 
 ### Changed
