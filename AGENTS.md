@@ -235,8 +235,35 @@ startRecording(): void
 stopRecording(): Promise<TranscriptionResult>
 // TranscriptionResult = { rawTranscript: string, polishedText: string | null, durationSeconds: number }
 
-// --- On-Demand LLM ---
-polishText(rawText: string): Promise<string>
+// --- On-Demand LLM (cleanup channel) ---
+polishText(rawText: string): Promise<string>          // returns plainText projection
+polishTextLocal(rawText: string): Promise<string>     // strictly local; never routes to cloud
+polishTextDetailed(rawText: string): Promise<{
+  markdown: string;     // verbatim LLM output
+  plainText: string;    // markdown stripped — used for FTS / TTS / clipboard
+  html: string;         // sanitize-html-approved (safe for dangerouslySetInnerHTML)
+  jsonString: string;   // JSON.stringify of ProseMirror JSON for setContent
+  providerUsed: 'claude' | 'copilot' | 'local';
+  text: string;         // legacy alias for plainText
+}>
+
+// --- Generic LLM transport (added in 1.7.5) ---
+// Caller owns the system prompt; no cleanup-prompt layering. Used by
+// SummaryGenerator, MeetingTemplateEngine, IntentClassifier, MeetingDetector.
+generateText(systemPrompt: string, userPrompt: string, opts?: {
+  maxTokens?: number;     // clamped to [1, 4096]
+  temperature?: number;   // clamped to [0, 1]
+  forceLocal?: boolean;   // bypass cloud regardless of polish_allow_cloud
+}): Promise<{ text: string; providerUsed: AIProvider }>
+generateTextLocal(systemPrompt: string, userPrompt: string, opts?: {
+  maxTokens?: number; temperature?: number;
+}): Promise<{ text: string; providerUsed: AIProvider }>
+
+// --- Markdown projections (added in 1.7.5) ---
+// Renderer's only access to the main-side sanitization pipeline.
+convertMarkdown(md: string): Promise<{
+  plainText: string; html: string; jsonString: string;
+}>
 
 // --- Entries CRUD ---
 createEntry(entry: NewEntry): Promise<Entry>

@@ -30,8 +30,15 @@ IronMic captures your voice, transcribes it with Whisper, optionally polishes it
 - **Voice-to-clipboard** — Press a global hotkey, speak, press again. Polished text lands in your clipboard, ready to paste anywhere.
 - **Voice-to-note** — Dictate directly into a rich text editor (TipTap/ProseMirror) with formatting, headings, lists, code blocks, and more.
 - **Whisper large-v3-turbo** — State-of-the-art local speech recognition with GPU acceleration (Metal on macOS).
-- **LLM text cleanup** — A local Mistral 7B model removes filler words, fixes grammar, and preserves your meaning. Toggleable per-entry.
+- **LLM text cleanup with smart formatting** <sup>NEW in 1.7.5</sup> — Polished output is now structured markdown that adapts to content shape: short notes stay clean paragraphs with **bold** for key terms (Granola-style), longer notes get H2/H3 sections, lists get bullets, file names get `inline code`, and tables for genuinely tabular data. Both local (Phi-3) and cloud (Claude / Copilot) paths produce structured output; cloud gets a richer prompt with worked examples for higher quality. Settings → "Smart formatting" toggles back to flat text if preferred.
 - **Custom dictionary** — Add domain-specific terms, names, and jargon to improve transcription accuracy.
+
+### Meeting Notes <sup>NEW in 1.7.5</sup>
+- **Structured summaries on every meeting** — Default template emits `## Attendees` + `## Overview` + `## Discussion` (with `### H3` per topic) + `## Decisions` (each prefixed `**Decided:**`) + `## Action Items` (markdown table with Owner / Item / Due) + `## Open Questions`. Sections are emitted only when they have content.
+- **Action items extraction emphasized** — The summarizer is explicitly tuned to surface action items ("usually the most valuable thing that comes out of a meeting") with concrete pattern hints. Rendered as a proper markdown table.
+- **Attendees pulled from the session roster** — Host + every joiner from the historical `participants` list is surfaced under the Attendees heading. The summarizer prepends a metadata block to the transcript so the LLM sources accurate names instead of guessing.
+- **Per-meeting-type templates** — Five built-in alternatives (Standup / 1-on-1 / Discovery / Team Sync / Retrospective) for users who want forced layouts. Each produces richer markdown than before — bold for names/decisions/deadlines, inline code for technical refs, action items as tables.
+- **Meeting list grouped by date** — Today / Yesterday / This week / Last week / This month / Earlier. Hide-empty toggle filters out short captures with no audio. Multi-select via mic icon click for bulk delete. Scroll position preserved across detail open + back.
 
 ### Text-to-Speech Read-Back
 - **Kokoro 82M TTS** — Hear your dictations read back through a local neural voice engine.

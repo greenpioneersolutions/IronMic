@@ -2,6 +2,103 @@
 
 All notable changes to IronMic will be documented in this file.
 
+## [1.7.5] - 2026-05-10
+
+Major upgrade to the polish + meeting-summary experience: every dictation
+and every meeting now produces a structured, well-formatted document
+instead of flat text. Hits Granola-style adaptive formatting (bold for
+key terms even on short notes, headings hierarchy that scales with
+length), and meeting summaries include attendees, an Overview, and a
+dedicated Action Items table extracted from the transcript.
+
+### Added
+
+#### Polished output is now structured markdown (not flat text)
+
+- **Adaptive heading hierarchy** in polished notes — short notes (<30 words) stay a single paragraph with **bold** for key subjects (names, decisions, deadlines, owners); 30–80 words get bullets when content is enumerated; 80–200 words get `### H3` sub-sections; >200 words get `## H2` sections with optional `### H3` inside. Both local and cloud paths produce markdown that the editor renders with full TipTap formatting (headings, bold, italic, lists, blockquotes, inline code, code blocks, action-item tables).
+- **Cloud polish gets richer prompts than local.** `LOCAL_POLISH_PROMPT` (~350 tokens, one example) is tuned for Phi-3-mini-Q2_K's instruction-following limits. `CLOUD_POLISH_PROMPT` (~900 tokens, four worked examples covering paragraph / multi-topic / list / technical shapes) takes advantage of Claude / Copilot's larger context. Both share the same markdown grammar — only the teaching style differs.
+- **Inline code for technical refs** — file names, function names, commands, package names, PR/JIRA refs all get `` `inline code` `` styling automatically.
+- **Tables for genuinely tabular dictated content** (cloud only — local model handles tables less reliably).
+- **Smart Formatting setting** — Settings → General → "Smart formatting" toggle (`polish_format_mode`) lets users opt out of the new rich rendering and fall back to the legacy flat-paragraph behavior. Default-on; persisted in SQLite. The toggle gates both prompt selection AND the markdown pipeline so plain mode is byte-for-byte identical to the prior behavior.
+
+#### Meeting summaries — structured, attended, action-item-focused
+
+- **New "Default" meeting template** (replaces the previous "Auto") with a simplified single-layout prompt that local Phi-3 follows reliably. Layout: `## Attendees` → `## Overview` → `## Discussion` (with optional `### H3` per topic) → `## Decisions` (each prefixed `**Decided:**`) → `## Action Items` (markdown table with Owner / Item / Due) → `## Open Questions`. Sections are emitted only when they have content — no "None mentioned" placeholders.
+- **Attendees auto-populated from session participants.** Host + every joiner from the v7 `participants` roster gets surfaced as a bullet under the Attendees heading. The summarizer prepends a `[MEETING METADATA]` block to the transcript so the LLM sources accurate names instead of inferring from filler.
+- **Action Items extraction emphasized in the prompt.** New language: *"Action items are usually the most valuable thing that comes out of a meeting — try hard to identify them."* Plus concrete pattern hints (explicit assignments, commitments, agreed next steps, follow-ups requested) to help the model surface them reliably.
+- **Auto-detect meeting templates upgraded.** All five existing templates (Standup / 1-on-1 / Discovery / Team Sync / Retrospective) now produce richer markdown — bold for names/decisions/deadlines, inline code for technical refs, action items rendered as proper markdown tables.
+- **Default template auto-selected on launch.** `meeting_default_template` is now read on `MeetingPage` mount and applied as the initial selection. Without this fix, every new meeting started without an explicit template click went through the flat-bullets path even after the v10 migration set the setting.
+- **Meeting list grouped by date bucket** — Today / Yesterday / This week / Last week / This month / Earlier. Empty buckets are hidden; sessions inside each bucket sort newest-first.
+- **Hide empty meetings toggle** in the meeting list header (default on) filters out sessions with `processingState === 'empty'` so noise from accidental short captures stays out of the way. Persisted to localStorage. Hidden count chip surfaces on the toggle so users know what they're not seeing.
+- **Multi-select bulk delete** — click any meeting card's mic icon to enter selection mode (icon swaps to a checkbox, all other cards' mics become empty checkboxes). Click cards to add/remove. A floating action bar at the bottom shows "N selected / Cancel / Delete N" with a confirm dialog. Per-card actions hide in selection mode for visual focus.
+- **Scroll position preserved across meeting open + back navigation** — clicking into a meeting and pressing back returns you to the same card you opened, not the top of the list. Implementation via a `useLayoutEffect`-anchored scroll restore on `detailSessionId` transition.
+
+#### Notes editor — Raw vs Polished split for meeting-auto entries
+
+- **Auto-filed meeting notes now have a meaningful Raw/Polished toggle.** Previously the markdown summary was written into `rawTranscript` with `polishedText: undefined`, so DictatePage showed the raw markdown source on the raw side and had nothing on the polished side. Now: polished side gets the rich AI summary (with formatted headings, bold, action-items table); raw side gets the verbatim meeting transcript. Polished view is the default per the existing schema default `display_mode = 'polished'`.
+
+#### AI Assistant — voice chat redesign
+
+- **Live AI panel** during voice chat now shows the assistant's words *as they're produced* (thinking phase) and *as they're spoken* (speaking phase), in a prominent card with `text-base` size and full-opacity color. Replaces the previous tiny grey 3-line `line-clamp-3` caption that read like an afterthought.
+- **Streaming caret** appears after the live tokens during the thinking phase so the panel feels alive while the model is still emitting output.
+- **Phase-aware labeling** — header reads "AI is thinking…" with a pulsing dot during streaming, then "AI is speaking…" while TTS plays the completed reply.
+- **Wider overlay** (`max-w-2xl` from `max-w-md`) gives the live panel room to breathe.
+
+#### New IPC channels
+
+- **`generateText(systemPrompt, userPrompt, opts?)`** — generic LLM transport for non-polish completions (meeting summarization, template generation, intent classification fallback, meeting detection). Caller owns the system prompt; no cleanup-prompt layering. Handler clamps `maxTokens` to `[1, 4096]`, `temperature` to `[0, 1]`, validates prompt lengths against `MAX_PROMPT_LENGTH`, and reads `polish_allow_cloud` from main-process settings only — renderer can pass `forceLocal: true` to narrow but never widen permissions.
+- **`generateTextLocal(systemPrompt, userPrompt, opts?)`** — same but with `forceLocal` pinned on. For callers (e.g. AI title generation) that must never touch cloud regardless of the user's setting.
+- **`convertMarkdown(md)`** — markdown → `{ plainText, html, jsonString }` projections from the main-side sanitization pipeline. Renderer never imports the pipeline directly. `html` is sanitize-html-approved (safe for `dangerouslySetInnerHTML`), `jsonString` is JSON.stringify of ProseMirror JSON ready for `editor.commands.setContent(JSON.parse(...))`.
+
+### Changed
+
+- **`polishTextDetailed` response shape** — was `{ text, providerUsed }`, now `{ markdown, plainText, html, jsonString, providerUsed, text }`. New callers consume the projections directly; legacy callers reading `.text` still work (kept as alias of `plainText`).
+- **`polishText` returns the `plainText` projection** — was the verbatim LLM output. Prevents markdown syntax bleed (`**bold**`, `## Heading`) into clipboards / Forge pastes / plain-text fields after the prompt change.
+- **`MeetingDetailPage` regenerate path no longer nulls `htmlContent`.** Previously the spread set `htmlContent: null` on the assumption that AI output is always plain. Now preserves `fresh.htmlContent` from the markdown pipeline so the rich summary survives a regenerate.
+- **`MAX_OUTPUT_TO_INPUT_RATIO`** bumped 0.8 → 1.6 in `runTemplateWithGuardrails`. Genuine transcript echoes still fail the long-verbatim-span check; legitimate structured summaries that happen to exceed 80% of input length are no longer rejected as "echo". Plus a new pass #3 fallback (`hasStructureWithoutPromptLeak`) accepts output the strict guard rejected as long as it has at least one heading or bullet and no prompt leakage.
+- **Meeting title generator** prompt tightened with worked examples ("Sprint planning", "Q4 budget review"), hard 5-word and 45-char clamps in `sanitizeTitle` so titles stay glanceable. Truncation is on a word boundary; trailing punctuation is stripped after the cut.
+- **`polish_allow_cloud` Settings copy** rewritten to reflect its broader scope — it now also gates meeting summaries, template generation, intent classification, and meeting detection. New copy: "Use cloud AI when authenticated (Claude / Copilot) … routes polish, meeting summarization, and other AI tasks through the authenticated CLI". Live meeting summaries always stay local regardless of this setting.
+- **Notebook auto-file (`addTextAsEntryToNotebook`)** now runs the markdown through `convertMarkdown` and writes both `polishedText` (plain) and `polishedTextJson` (rich ProseMirror) — same shape as the dictation polish flow. The resulting entry opens in DictatePage with full headings/bold/lists rendering.
+- **`MeetingSessionCard` restructured from `<button>` to `<div role="button">`.** Nested `<button>` elements (the AddToNotebook menu inside the outer card button) caused click events to be swallowed. Now nested interactive children get their own clicks, and the keyboard semantics are preserved via `role` + `tabIndex` + Enter/Space handlers.
+- **ShareMenu removed from meeting cards.** AddToNotebook now actually works.
+- **MeetingRegenerateModal** — removed the "Free-form bullets (no template)" option; pre-selects the Default template (`builtin-auto`) when the meeting has no current template. Generic / no-template button removed from the meeting start screen too. Every meeting now goes through a template so output is always structured.
+- **Marked pinned to v4** (CJS-compatible). v18+ is ESM-only and Electron's CommonJS main process can't `require()` it.
+
+### Fixed
+
+- **Meeting summary section keys produced lowercase headings** in the auto-filed Notes entry (`## tldr`, `## discussion`) because `SECTION_TITLES` was missing those keys. Now covers every key any seeded template emits — fresh meetings produce proper-cased `## TL;DR` / `## Overview` / `## Discussion` / etc.
+- **Meeting `plainSummary` reconstruction was lossy** — the template path returned a `StructuredOutput` without `plainSummary`, so `MeetingPage`'s `summaryForColumn` always fell through to the section-by-section markdown rebuild. Now populated from the LLM's raw output so the notebook auto-file uses the actual produced markdown.
+- **Auto template prompt always returned `[INSUFFICIENT_CONTENT]`** on perfectly good transcripts. The v10 prompt asked Phi-3-mini to classify the meeting type into one of 8 buckets and emit a per-bucket layout — too much instruction-following for the small model. v11 simplified to a single fixed structured layout and removed the escape hatch entirely.
+- **First message to Claude / Copilot in a new chat failed with `claude exited with code null: (no stderr)`.** Root cause was two defensive `aiResetSession(id)` calls — one enqueued in `useAiChatStore.createSession`, one direct in `AIChat.handleNewChat` — that fired `aiManager.cancel()` on whatever CLI process was active. The user's just-spawned first-message process got SIGTERM'd before any output arrived. Both defensive calls removed; a brand-new session id has no context to clear by definition.
+- **Claude Haiku model id was malformed** — `claude-haiku-3-5-20241022` instead of `claude-3-5-haiku-20241022`. The Claude CLI rejected it with "model may not exist or you may not have access to it." Corrected the dated id, added Haiku 4.5 (`claude-haiku-4-5`) alongside, and added a `normalizeKnownBadModelId` helper in `AIManager.resolveModel` so users with the bogus id already saved in their `ai_model` setting get transparently rewritten on read — no need to manually re-pick.
+- **Polish overlay only covered the top portion of long notes.** The "Generating polished version…" overlay was an `absolute inset-0` child of the scrolling editor container. Restructured DictatePage's editor wrapper so the overlay covers the viewport, not the scroll content area.
+- **Tailwind Typography `prose` classes had no effect** on `dangerouslySetInnerHTML` containers (MeetingNotesPanel, MeetingDetailPage user-notes pane) because the `@tailwindcss/typography` plugin was never installed. Added explicit `.prose` CSS rules in `globals.css` mirroring the existing `.ProseMirror` styles so headings, bold, lists, blockquotes, and tables render correctly outside the editor.
+- **Live summary path bypassed user-selected templates.** When a non-empty live summary existed at meeting end, `MeetingPage` routed straight to `finalizeWithLiveSummary` (flat bullets) regardless of the selected template. Now: when a template is selected (always, post-Default-auto-selection), the structured pass always runs.
+- **NoteEditor inserted plain text instead of the rich JSON fragment** when polish completed after dictation. Now reads `entry.polishedTextJson`, parses it, and `insertContent`s the block-node array (preserves any user content the new dictation is appended into).
+- **`useEntryStore.polishEntry` was deliberately dropping `polishedTextJson`** from the update with a stale comment ("Polish output is plaintext"). Now writes both `polishedText` and `polishedTextJson` atomically. DictatePage's reactive sync at line 1366 already preferred the JSON projection, so the editor renders rich content as soon as polish completes.
+- **DictatePage's editor was missing Table + TaskList extensions.** Even when `polishedTextJson` arrived correctly, action-item tables and checkboxes from cloud polish would be silently dropped by the editor schema. Now spreads `buildSharedExtensions()` — the same set the markdown pipeline's `@tiptap/html generateJSON` uses in main.
+- **`polished_text_json` write contract was contradictory.** `polishTextDetailed.json` was an object internally, but the IPC + DB layer expects strings. Pinned the public IPC shape to strings (`jsonString: string`); the object form stays private to `markdownPipeline.ts` in main and never crosses IPC.
+- **NPM `@tailwindcss/typography` not installed** — added explicit `.prose` CSS rules instead, mirroring the existing `.ProseMirror` ones.
+- **Meeting card share/export removed; AddToNotebook now functional** (was broken by the nested `<button>` HTML — see Changed above).
+
+### Migration notes
+
+- **Schema bumped from v9 → v12.** Three new migrations in series:
+  - **v10**: seeds the new "Auto" meeting template; equality-guarded UPDATE on the 5 existing builtin templates' `llm_prompt` to richer-formatting versions; flips `meeting_default_template = 'builtin-auto'` for users where the setting is still empty; seeds `polish_format_mode = 'rich'`.
+  - **v11**: simplifies the Auto template prompt (single fixed layout instead of 8-way meeting-type classification, removes the `[INSUFFICIENT_CONTENT]` escape hatch); renames "Auto (smart format)" → "Default" in the user-facing label.
+  - **v12**: adds `## Attendees` + `## Overview` to the Default template; emphasizes Action Items in the prompt body. (Date intentionally NOT in the layout — the meeting detail header already shows it.)
+  - All three use equality-guarded UPDATEs against their respective baseline constants. **User customizations to builtin templates are preserved** — the UPDATE only fires when the row matches the prior version's exact bytes.
+- **No new schema columns for `entries` or `meeting_sessions`.** Reuses the existing `polished_text_json` (added in v6) for rich entry content and `structured_output.htmlContent` (already in use) for meeting rich content.
+- **For meetings created before v12:** hit Regenerate to pick up the new layout (Attendees + Overview + Action Items emphasis). Old meetings keep working as-is.
+- **For polish-completed entries created before v1.7.5:** the legacy `polished_text` column stays as the rendering source; the `polishedTextJson` rich projection only populates for fresh polishes.
+
+### Verification
+
+- `cargo test --lib` passes 166/166 (5 new migration tests across v10/v11/v12, 161 prior tests unchanged).
+- TypeScript main typecheck clean; renderer typecheck unchanged from baseline (30 pre-existing errors, 0 new).
+- Markdown pipeline security smoke: 14/14 passing — `<script>` tag drop, `javascript:` href reject, task-list checked-state preservation, table round-trip.
+- `@tiptap/html` Node-compat smoke passes without DOM shim — no `jsdom` required.
+
 ## [1.7.4] - 2026-05-08
 
 ### Fixed
