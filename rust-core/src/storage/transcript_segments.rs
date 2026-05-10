@@ -52,6 +52,7 @@ const SELECT_COLS: &str =
 
 impl Database {
     /// Add a new transcript segment for a meeting session.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_transcript_segment(
         &self,
         session_id: &str,
@@ -97,6 +98,7 @@ impl Database {
     /// originator's segment id) so participant rejoin can dedup welcome-snapshot
     /// replays. Idempotent on `(session_id, remote_segment_id)`: a second call
     /// with the same pair returns the existing row instead of inserting a dupe.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_transcript_segment_with_remote_id(
         &self,
         session_id: &str,

@@ -128,12 +128,14 @@ fn build_vocab() -> HashMap<char, i64> {
 /// Maximum number of unpadded phoneme tokens per synthesis call. Kokoro's
 /// model context is 510 tokens before padding; we sit a few below to leave
 /// headroom for the 2 PAD tokens and any rounding inside ort's graph.
+#[cfg(feature = "tts")]
 const MAX_UNPADDED_TOKENS: usize = 500;
 
 /// Approximate source-character budget per chunk. English text phonemizes at
 /// roughly 1 phoneme/char, with letter-dense fragments going as high as 5×.
 /// 250 chars is conservative for ordinary prose and small enough that even
 /// a worst-case acronym-heavy chunk stays well under MAX_UNPADDED_TOKENS.
+#[cfg(feature = "tts")]
 const CHUNK_CHAR_TARGET: usize = 250;
 
 /// Public re-export so the napi layer can split before orchestrating

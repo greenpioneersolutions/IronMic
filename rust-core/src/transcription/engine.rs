@@ -29,6 +29,7 @@
 //! - With neither feature, [`active_engine()`] returns a [`NullEngine`] that
 //!   errors on transcribe — useful for early-boot states and headless tests.
 
+#[cfg(feature = "engine-multi")]
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
@@ -41,6 +42,7 @@ use crate::error::IronMicError;
 /// Mirrors the pattern in [`crate::transcription::whisper`] so Moonshine and
 /// Whisper models share the same root directory. The Electron host sets
 /// `IRONMIC_MODELS_DIR` to the app's `Resources/models` path in production.
+#[cfg(feature = "engine-multi")]
 fn models_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("IRONMIC_MODELS_DIR") {
         return PathBuf::from(dir);
@@ -76,6 +78,7 @@ impl EngineKind {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "moonshine-base" => Some(EngineKind::MoonshineBase),

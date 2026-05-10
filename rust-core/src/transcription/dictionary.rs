@@ -119,7 +119,7 @@ impl Dictionary {
         let mut dict_sorted: Vec<&str> = dict_words.iter().map(|s| s.as_str()).collect();
         dict_sorted.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
 
-        for term in extras_sorted.into_iter().chain(dict_sorted.into_iter()) {
+        for term in extras_sorted.into_iter().chain(dict_sorted) {
             let key = term.to_lowercase();
             if seen.insert(key) {
                 ordered.push(term.to_string());
