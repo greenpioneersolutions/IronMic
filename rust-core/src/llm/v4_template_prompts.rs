@@ -63,9 +63,13 @@ pub const AUTO_TEMPLATE_TYPE: &str = "auto";
 /// Sections list for the default template. The renderer's parseSections
 /// only cares about ## headings present in the LLM output — the section
 /// keys here are the canonical superset for the simplified layout.
-pub const AUTO_TEMPLATE_SECTIONS: &str = r#"["tldr","decisions","discussion","action_items","open_questions"]"#;
+/// v12 adds `attendees` at the front and renames `tldr` → `overview`.
+/// (Date is intentionally omitted — the meeting detail header already
+/// shows the date prominently above the notes; duplicating it inside
+/// the body adds noise.)
+pub const AUTO_TEMPLATE_SECTIONS: &str = r#"["attendees","overview","discussion","decisions","action_items","open_questions"]"#;
 
-pub const AUTO_TEMPLATE_LAYOUT: &str = r#"{"order":["tldr","decisions","discussion","action_items","open_questions"]}"#;
+pub const AUTO_TEMPLATE_LAYOUT: &str = r#"{"order":["attendees","overview","discussion","decisions","action_items","open_questions"]}"#;
 
 /// The v10 baseline prompt for `builtin-auto`. Kept verbatim so the v11
 /// migration's equality-guarded UPDATE can recognize and overwrite v10-
@@ -83,17 +87,33 @@ pub const V10_AUTO_TEMPLATE_SECTIONS: &str = r#"["tldr","decisions","action_item
 /// V10 layout — kept for the equality guard.
 pub const V10_AUTO_TEMPLATE_LAYOUT: &str = r#"{"order":["tldr","decisions","discussion","action_items","open_questions","feedback","follow_ups","went_well","improve","scope","milestones","owners","risks","pain_points","requirements","next_steps","budget_timeline","updates"]}"#;
 
-/// Default template prompt — simplified from the prior multi-layout
-/// auto-detect version. The earlier prompt asked the local Phi-3-mini-Q2_K
-/// to (a) classify the meeting type into one of 8 buckets, then (b)
-/// produce a layout from a per-bucket spec — too much instruction-
-/// following for the small model, which often bailed out with the
-/// `[INSUFFICIENT_CONTENT]` escape hatch on perfectly good transcripts.
+/// V11 baseline constants for the auto template — preserved verbatim so
+/// the v12 migration's equality-guarded UPDATE only fires when the row
+/// hasn't been customized post-v11. Once v12 has run on every install,
+/// these are dead constants kept as historical reference.
+pub const V11_AUTO_TEMPLATE_PROMPT: &str = "You are a professional meeting notes assistant. Given the meeting transcript below, produce well-structured markdown notes.\n\nLAYOUT — emit only the sections that have content:\n\n## TL;DR\nOne or two sentences capturing the meeting in plain language.\n\n## Decisions\n- **Decided:** what was agreed (one bullet per decision)\n\n## Discussion\nBrief paragraph(s) or bullets covering main topics. Use ### sub-headings if there are multiple distinct topics.\n\n## Action Items\nMarkdown table with columns Owner | Item | Due (omit Due cell if not stated):\n| Owner | Item | Due |\n| --- | --- | --- |\n\n## Open Questions\n- Bullets for unresolved follow-ups\n\nFORMATTING:\n- **Bold** names, decisions, deadlines, owners, totals\n- Use `inline code` for file/function/PR/JIRA refs\n- Use professional vocabulary: \"blockers\", \"action items\", \"deliverables\", \"stakeholders\"\n\nHARD RULES:\n- Stay grounded in the transcript — every claim must trace to what was said\n- Never invent participants, dates, numbers, or facts\n- Skip sections with no content (don't write \"None mentioned\" or empty headings)\n- Output ONLY the markdown sections — no preamble (\"Here are the notes:\"), no closing remarks\n\nTranscript:\n{transcript}";
+
+pub const V11_AUTO_TEMPLATE_SECTIONS: &str = r#"["tldr","decisions","discussion","action_items","open_questions"]"#;
+pub const V11_AUTO_TEMPLATE_LAYOUT: &str = r#"{"order":["tldr","decisions","discussion","action_items","open_questions"]}"#;
+
+/// Default template prompt (v12).
 ///
-/// Now: one fixed layout. Sections are emitted only when they have
-/// content. Cloud models do well with this; local models do too because
-/// the instructions fit in a few hundred tokens. No `[INSUFFICIENT_CONTENT]`
-/// escape hatch — if the transcript is genuinely empty, the upstream
-/// `wordCount(trimmed) < MIN_WORDS_FOR_SUMMARY` guard already short-
-/// circuits to `processingState: 'empty'` before this prompt runs.
-pub const AUTO_TEMPLATE_PROMPT: &str = "You are a professional meeting notes assistant. Given the meeting transcript below, produce well-structured markdown notes.\n\nLAYOUT — emit only the sections that have content:\n\n## TL;DR\nOne or two sentences capturing the meeting in plain language.\n\n## Decisions\n- **Decided:** what was agreed (one bullet per decision)\n\n## Discussion\nBrief paragraph(s) or bullets covering main topics. Use ### sub-headings if there are multiple distinct topics.\n\n## Action Items\nMarkdown table with columns Owner | Item | Due (omit Due cell if not stated):\n| Owner | Item | Due |\n| --- | --- | --- |\n\n## Open Questions\n- Bullets for unresolved follow-ups\n\nFORMATTING:\n- **Bold** names, decisions, deadlines, owners, totals\n- Use `inline code` for file/function/PR/JIRA refs\n- Use professional vocabulary: \"blockers\", \"action items\", \"deliverables\", \"stakeholders\"\n\nHARD RULES:\n- Stay grounded in the transcript — every claim must trace to what was said\n- Never invent participants, dates, numbers, or facts\n- Skip sections with no content (don't write \"None mentioned\" or empty headings)\n- Output ONLY the markdown sections — no preamble (\"Here are the notes:\"), no closing remarks\n\nTranscript:\n{transcript}";
+/// History: v10 asked the local Phi-3-mini to classify the meeting into
+/// one of 8 buckets and emit a per-bucket layout — too elaborate, model
+/// kept bailing with `[INSUFFICIENT_CONTENT]`. v11 simplified to a single
+/// fixed layout (TL;DR / Decisions / Discussion / Action Items / Open
+/// Questions). v12 evolves it further per user feedback:
+///   - Renames TL;DR → Overview (clearer to non-technical readers)
+///   - Adds an Attendees section at the top (sourced from the metadata
+///     block the caller prepends to {transcript})
+///   - Emphasizes Action Items extraction in the prompt body — they're
+///     usually the most valuable artifact of any meeting
+///
+/// Date is intentionally NOT in the layout — the meeting detail header
+/// already displays it prominently above the notes; duplicating inside
+/// the body is noise.
+///
+/// Sections are emitted only when they have content; no
+/// `[INSUFFICIENT_CONTENT]` escape hatch — the upstream wordCount guard
+/// already short-circuits empty transcripts.
+pub const AUTO_TEMPLATE_PROMPT: &str = "You are a professional meeting notes assistant. Given the meeting transcript below (and any metadata block at the top of the transcript), produce well-structured markdown notes.\n\nLAYOUT — emit only the sections that have content, in this order:\n\n## Attendees\n- [One bullet per attendee from the metadata block. If additional names are clearly mentioned in the transcript as participants (e.g. introducing themselves, being addressed), add them too. If neither metadata nor transcript identifies attendees, omit this section.]\n\n## Overview\n[One or two sentences capturing what the meeting was about in plain language. Replaces TL;DR — the user prefers \"Overview\" because it's clearer to non-technical readers.]\n\n## Discussion\nBrief paragraph(s) or bullets covering main topics. Use ### sub-headings if there are multiple distinct topics.\n\n## Decisions\n- **Decided:** what was agreed (one bullet per decision)\n\n## Action Items\n**Action items are usually the most valuable thing that comes out of a meeting — try hard to identify them.** Look for: explicit assignments (\"Alice will…\"), commitments (\"I'll send…\"), agreed next steps (\"we need to ship X by Friday\"), and follow-ups requested. Render as a markdown table:\n| Owner | Item | Due |\n| --- | --- | --- |\nOmit the Due cell when not stated. If the transcript truly contains no action items, omit this section — don't fabricate.\n\n## Open Questions\n- Bullets for unresolved follow-ups\n\nFORMATTING:\n- **Bold** names, decisions, deadlines, owners, totals\n- Use `inline code` for file/function/PR/JIRA refs\n- Use professional vocabulary: \"blockers\", \"action items\", \"deliverables\", \"stakeholders\"\n\nHARD RULES:\n- Stay grounded in the transcript / metadata — every claim must trace back\n- Attendees come ONLY from the metadata block — do not invent an attendee list\n- Never invent decisions, action items, numbers, or facts\n- Skip sections with no content (don't write \"None mentioned\" or empty headings)\n- Output ONLY the markdown sections — no preamble (\"Here are the notes:\"), no closing remarks\n\nTranscript:\n{transcript}";

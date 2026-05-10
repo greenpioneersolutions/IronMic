@@ -37,7 +37,12 @@ export interface StructuredMeetingOutput {
  *  to the raw lowercase key as the title, which then gets serialized into
  *  the auto-filed notebook entry as `## tldr` instead of `## TL;DR`. */
 const SECTION_TITLES: Record<string, string> = {
-  // Default (builtin-auto) template keys
+  // Default (builtin-auto) template keys, v12 layout
+  attendees: 'Attendees',
+  overview: 'Overview',
+  // Legacy v11 key for the same Default template — kept so any persisted
+  // structured_output written before the v12 migration still maps to a
+  // proper title when re-rendered.
   tldr: 'TL;DR',
   discussion: 'Discussion',
   // Standup

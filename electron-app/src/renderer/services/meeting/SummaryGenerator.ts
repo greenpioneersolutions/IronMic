@@ -106,9 +106,40 @@ export const SUMMARY_UNAVAILABLE_MESSAGE =
  * well-formed StructuredOutput — callers can persist the result directly
  * into `meeting_sessions.structured_output`.
  */
+/**
+ * Optional metadata threaded through to the LLM as a `[MEETING METADATA]`
+ * block prepended to the transcript. Lets the Default template's
+ * Attendees section quote accurate values instead of guessing or
+ * fabricating from filler in the transcript.
+ *
+ * Currently only Attendees — date is intentionally omitted because the
+ * meeting detail header already shows it prominently above the notes.
+ */
+export interface SummaryContext {
+  /** Display names of meeting attendees from session.participants. Hosts
+   *  + joiners; ordering is preserved. Empty array is treated the same
+   *  as undefined (no Attendees section). */
+  attendees?: string[];
+}
+
+/**
+ * Build the `[MEETING METADATA]` block to prepend to {transcript}. Returns
+ * an empty string when no metadata is provided so callers don't have to
+ * branch — the result is always safe to concatenate.
+ */
+function buildMetadataBlock(context: SummaryContext | undefined): string {
+  if (!context) return '';
+  const attendees = (context.attendees ?? [])
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (attendees.length === 0) return '';
+  return `[MEETING METADATA — use this for the Attendees section; do not invent]\nAttendees: ${attendees.join(', ')}\n\n`;
+}
+
 export async function generateMeetingSummary(
   transcript: string,
   template: MeetingTemplate | null,
+  context?: SummaryContext,
 ): Promise<StructuredOutput> {
   const generatedAt = new Date().toISOString();
   const trimmed = (transcript ?? '').trim();
@@ -136,6 +167,15 @@ export async function generateMeetingSummary(
       // Fall back to a hard-truncated head-of-transcript so we at least try.
       inputForFinalPass = trimmed.slice(0, SINGLE_PASS_CHAR_LIMIT);
     }
+  }
+
+  // Prepend the metadata block AFTER the condense step so the
+  // condensation pass doesn't waste tokens summarizing the metadata
+  // header. The Default template prompt's `## Date` / `## Attendees`
+  // sections instruct the LLM to source from this block.
+  const metadataBlock = buildMetadataBlock(context);
+  if (metadataBlock) {
+    inputForFinalPass = `${metadataBlock}${inputForFinalPass}`;
   }
 
   // Final pass — template or plain summary.

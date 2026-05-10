@@ -1123,7 +1123,11 @@ export function MeetingPage() {
       // Delegate to the shared summarizer so MeetingPage (initial generation) and
       // MeetingDetailPage (regenerate) share the same echo-guardrails + chunking.
       const { generateMeetingSummary } = await import('../services/meeting/SummaryGenerator');
-      const structured = await generateMeetingSummary(transcript, template);
+      // Build the metadata context (date + attendees) from the session
+      // record so the Default template can render accurate Date /
+      // Attendees sections instead of guessing or omitting.
+      const summaryContext = await buildSummaryContextForSession(sessionId);
+      const structured = await generateMeetingSummary(transcript, template, summaryContext);
 
       // Flatten sections (or plainSummary) into the plain-text `summary` column so
       // list views still render a preview. Skip "None mentioned" placeholders.
@@ -1966,6 +1970,41 @@ export function MeetingPage() {
  * not enough to summarize; we treat those as keepers (the user might
  * still want their raw transcript), so only 'empty' is filtered.
  */
+/**
+ * Pull attendees from the session's v7 `participants` roster for the
+ * SummaryGenerator's Attendees section. Returns undefined when no
+ * roster entry resolves to a non-empty display name — generateMeetingSummary
+ * then skips the metadata block and the Default template prompt omits
+ * the Attendees section.
+ *
+ * Date is intentionally NOT in the context — the meeting detail header
+ * shows it above the notes; we don't want a duplicate inside the body.
+ */
+async function buildSummaryContextForSession(
+  sessionId: string,
+): Promise<{ attendees?: string[] } | undefined> {
+  try {
+    const raw = await window.ironmic.meetingGet(sessionId);
+    if (!raw) return undefined;
+    const session = JSON.parse(raw);
+    if (typeof session?.participants !== 'string' || !session.participants.trim()) {
+      return undefined;
+    }
+    try {
+      const roster = JSON.parse(session.participants);
+      if (!Array.isArray(roster)) return undefined;
+      const names = roster
+        .map((p: any) => (typeof p?.displayName === 'string' ? p.displayName.trim() : ''))
+        .filter((s: string) => s.length > 0);
+      return names.length > 0 ? { attendees: names } : undefined;
+    } catch {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 function isSessionEmpty(session: { structured_output?: string }): boolean {
   if (!session.structured_output) return false;
   try {

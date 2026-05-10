@@ -7,7 +7,7 @@ use tracing::info;
 use crate::error::IronMicError;
 
 /// Schema version for migration tracking.
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 
 /// Get the platform-appropriate app data directory for IronMic.
 pub fn app_data_dir() -> PathBuf {
@@ -157,6 +157,10 @@ impl Database {
 
         if current_version < 11 {
             self.migrate_v11(&conn)?;
+        }
+
+        if current_version < 12 {
+            self.migrate_v12(&conn)?;
         }
 
         // Update version
@@ -826,6 +830,49 @@ impl Database {
         Ok(())
     }
 
+    /// Migration v12: add Date / Attendees / Overview to the Default
+    /// template, and emphasize Action Items in the prompt body.
+    ///
+    /// The v11 prompt produced TL;DR / Decisions / Discussion / Action
+    /// Items / Open Questions. Per user feedback we now want every
+    /// generated meeting note to start with date + attendees clearly,
+    /// rename TL;DR → Overview, and try harder to surface action items.
+    /// Caller (SummaryGenerator) prepends a `[MEETING METADATA]` block
+    /// to the transcript so the LLM has accurate values for Date and
+    /// Attendees instead of guessing from filler.
+    ///
+    /// Equality-guarded on the v11 baseline name + prompt so user
+    /// customizations are preserved.
+    fn migrate_v12(&self, conn: &Connection) -> Result<(), IronMicError> {
+        use crate::llm::v4_template_prompts as t;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE meeting_templates
+             SET llm_prompt = ?1,
+                 sections = ?2,
+                 display_layout = ?3,
+                 updated_at = ?4
+             WHERE id = 'builtin-auto'
+               AND llm_prompt = ?5
+               AND sections = ?6
+               AND display_layout = ?7",
+            rusqlite::params![
+                t::AUTO_TEMPLATE_PROMPT,         // ?1 — new v12 prompt
+                t::AUTO_TEMPLATE_SECTIONS,       // ?2 — new sections list
+                t::AUTO_TEMPLATE_LAYOUT,         // ?3 — new layout
+                now,                             // ?4 — updated_at
+                t::V11_AUTO_TEMPLATE_PROMPT,     // ?5 — v11 prompt guard
+                t::V11_AUTO_TEMPLATE_SECTIONS,   // ?6 — v11 sections guard
+                t::V11_AUTO_TEMPLATE_LAYOUT,     // ?7 — v11 layout guard
+            ],
+        )
+        .map_err(|e| IronMicError::Storage(format!("Migration v12 update Default template failed: {e}")))?;
+
+        info!("Migration v12 applied: Default template now includes Date + Attendees + Overview, emphasizes Action Items");
+        Ok(())
+    }
+
     fn seed_builtin_templates(&self, conn: &Connection) -> Result<(), IronMicError> {
         let now = chrono::Utc::now().to_rfc3339();
         let templates = vec![
@@ -1098,6 +1145,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(name, USER_NAME);
+        assert_eq!(prompt, USER_PROMPT);
+    }
+
+    #[test]
+    fn migration_v12_adds_attendees_overview_to_default() {
+        use crate::llm::v4_template_prompts as t;
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn();
+
+        let (prompt, sections, layout): (String, String, String) = conn
+            .query_row(
+                "SELECT llm_prompt, sections, display_layout FROM meeting_templates WHERE id='builtin-auto'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(prompt, t::AUTO_TEMPLATE_PROMPT);
+        assert_eq!(sections, t::AUTO_TEMPLATE_SECTIONS);
+        assert_eq!(layout, t::AUTO_TEMPLATE_LAYOUT);
+        // Spot-check the new section keys are in the sections JSON.
+        assert!(sections.contains("attendees"));
+        assert!(sections.contains("overview"));
+        // Date intentionally NOT in the layout — meeting header shows it.
+        assert!(!sections.contains("\"date\""));
+        // Spot-check the new prompt content references the new sections.
+        assert!(prompt.contains("## Attendees"));
+        assert!(prompt.contains("## Overview"));
+        assert!(!prompt.contains("## TL;DR"));
+        assert!(!prompt.contains("## Date"));
+        // Action items emphasis verbiage is present.
+        assert!(prompt.to_lowercase().contains("action items are usually the most valuable"));
+    }
+
+    #[test]
+    fn migration_v12_preserves_user_customized_default() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn();
+
+        // Simulate a user who customized the Default template after v11.
+        const USER_PROMPT: &str = "USER CUSTOMIZED default — do not overwrite";
+        conn.execute(
+            "UPDATE meeting_templates
+             SET llm_prompt = ?1
+             WHERE id = 'builtin-auto'",
+            [USER_PROMPT],
+        )
+        .unwrap();
+
+        // Re-run v12; equality guard requires v11 baseline prompt match.
+        db.migrate_v12(&conn).unwrap();
+
+        let prompt: String = conn
+            .query_row(
+                "SELECT llm_prompt FROM meeting_templates WHERE id='builtin-auto'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(prompt, USER_PROMPT);
     }
 

@@ -397,8 +397,28 @@ export function MeetingDetailPage({ sessionId, onBack, onUpdated }: Props) {
       setSession({ ...session, structured_output: JSON.stringify(placeholder) });
 
       // 3. Run the shared summarizer (notify main process for quit-guard).
+      // Build the metadata context (attendees only — date is shown in the
+      // meeting header above the notes, no need to duplicate it inside).
+      // Attendees come from the v7 participants roster (host + every joiner).
       window.ironmic?.notifyProcessingState?.(true);
-      const fresh = await generateMeetingSummary(transcript, args.template);
+      let summaryContext: { attendees?: string[] } | undefined;
+      const rawParticipants = (session as any).participants;
+      if (typeof rawParticipants === 'string' && rawParticipants.trim()) {
+        try {
+          const roster = JSON.parse(rawParticipants);
+          if (Array.isArray(roster)) {
+            const names = roster
+              .map((p: any) => (typeof p?.displayName === 'string' ? p.displayName.trim() : ''))
+              .filter((s: string) => s.length > 0);
+            if (names.length > 0) summaryContext = { attendees: names };
+          }
+        } catch { /* malformed — skip */ }
+      }
+      const fresh = await generateMeetingSummary(
+        transcript,
+        args.template,
+        summaryContext,
+      );
 
       // 4. Preserve title + carried versions in the fresh output.
       //    Title preservation rules (do NOT overload hasUserEdits — that
