@@ -24,7 +24,6 @@ export function AIChat() {
   const [authState, setAuthState] = useState<{ copilot: AuthStatus; claude: AuthStatus; local: AuthStatus } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showNotePicker, setShowNotePicker] = useState(false);
-  const [attachedNotes, setAttachedNotes] = useState<Note[]>([]);
   const [conversational, setConversational] = useState(false);
   const conversationalRef = useRef(false);
   conversationalRef.current = conversational;
@@ -44,6 +43,30 @@ export function AIChat() {
 
   const { activeSession, createSession, setActiveSession, addMessage } =
     useAiChatStore();
+
+  // Attached-context pills are now per-session and persisted to localStorage
+  // via the store. Reading via a selector keyed off `activeSessionId` means:
+  //   - navigating away from AIChat doesn't lose attachments
+  //   - reloading the app doesn't lose attachments
+  //   - switching between chat sessions in the history drawer shows each
+  //     session's own attachments (don't bleed across)
+  const attachedNotes = useAiChatStore((s) => {
+    const id = s.activeSessionId;
+    return id ? (s.attachedContextBySession[id] ?? []) : [];
+  });
+
+  /** Make sure we have a session id before recording an attach action.
+   *  First-time attach creates the session so attachment intent survives
+   *  reloads even if the user never hits send. The created session
+   *  appears in the history drawer as a "New Chat" until the title
+   *  inference (after the first assistant reply) renames it. */
+  const ensureSession = useCallback((): string => {
+    let id = useAiChatStore.getState().activeSessionId;
+    if (!id) {
+      id = useAiChatStore.getState().createSession(provider ?? null);
+    }
+    return id;
+  }, [provider]);
 
   /** Live read of `voice_chat_allow_cloud`. Always re-fetched at decision
    *  time — Settings can flip it OFF in another tab mid-session and we must
@@ -835,7 +858,10 @@ export function AIChat() {
                     <Icon className="w-3 h-3 flex-shrink-0" />
                     <span className="truncate">{n.title || 'Untitled'}</span>
                     <button
-                      onClick={() => setAttachedNotes((prev) => prev.filter((x) => x.id !== n.id))}
+                      onClick={() => {
+                        const id = useAiChatStore.getState().activeSessionId;
+                        if (id) useAiChatStore.getState().removeAttachment(id, n.id);
+                      }}
                       className="ml-0.5 opacity-60 hover:opacity-100 hover:text-iron-danger flex-shrink-0"
                       aria-label={`Detach ${n.title || 'item'}`}
                     >
@@ -846,7 +872,10 @@ export function AIChat() {
               })}
               {attachedNotes.length > 1 && (
                 <button
-                  onClick={() => setAttachedNotes([])}
+                  onClick={() => {
+                    const id = useAiChatStore.getState().activeSessionId;
+                    if (id) useAiChatStore.getState().clearAttachments(id);
+                  }}
                   className="ml-auto text-[10px] text-iron-text-muted hover:text-iron-danger underline-offset-2 hover:underline"
                 >
                   Clear all
@@ -973,22 +1002,21 @@ export function AIChat() {
       {/* Note picker modal — stays open after each pick so the user can
           keep adding sources in one motion. Closing is explicit (X button,
           ESC, or backdrop click). Selected items render as pills inside
-          the modal too, so detaching can happen without dismissing. */}
+          the modal too, so detaching can happen without dismissing.
+          Attaching here auto-creates a session if there isn't one yet so
+          the attachment is persisted from the moment of intent. */}
       <NotePickerModal
         open={showNotePicker}
         onClose={() => setShowNotePicker(false)}
         onSelect={(note) => {
-          setAttachedNotes((prev) => {
-            // Idempotent: re-picking an already-attached item is a no-op,
-            // not a duplicate. The pill row visibly reflects that nothing
-            // changed, and the row's row-level Check on that list item
-            // stays lit.
-            if (prev.find((n) => n.id === note.id)) return prev;
-            return [...prev, note];
-          });
+          const id = ensureSession();
+          useAiChatStore.getState().addAttachment(id, note);
         }}
         selectedNotes={attachedNotes}
-        onDeselect={(id) => setAttachedNotes((prev) => prev.filter((n) => n.id !== id))}
+        onDeselect={(id) => {
+          const sid = useAiChatStore.getState().activeSessionId;
+          if (sid) useAiChatStore.getState().removeAttachment(sid, id);
+        }}
       />
     </div>
   );

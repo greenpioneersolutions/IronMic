@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { Note } from './useNotesStore';
 
 export type AIProvider = 'copilot' | 'claude' | 'local';
 
@@ -39,9 +40,25 @@ interface AiChatStore {
    *  against this id are rejected at the API boundary so a late append can't
    *  resurrect the row. */
   closedForWrites: Set<string>;
+  /** Per-session attached context pills. Persisted to localStorage so that
+   *  navigating away from AI Chat (or reloading the app) preserves the user's
+   *  built-up context. Each session's array is what the AIChat pill row reads
+   *  and what gets prepended to the LLM prompt on every turn.
+   *
+   *  Kept in localStorage rather than the SQLite ai_chat_sessions table:
+   *  attached notes are local-machine metadata (notes themselves live in
+   *  SQLite, but the *attachment* is a UX state), no cross-machine sync
+   *  needs apply, and adding a schema migration just for this would be heavy.
+   *  If this graduates to a sync-eligible feature later it can move into the
+   *  table behind a small migration. */
+  attachedContextBySession: Record<string, Note[]>;
 
   // Getters
   activeSession: () => AiSession | null;
+  /** Convenience for components that just need "what's attached on the
+   *  currently-active chat right now" — saves having to read both
+   *  `activeSessionId` and `attachedContextBySession` separately. */
+  attachedForActive: () => Note[];
 
   // Actions (sync where existing callers depend on it; async for read paths)
   hydrate: () => Promise<void>;
@@ -54,6 +71,20 @@ interface AiChatStore {
   pinSession: (id: string, pinned: boolean) => void;
   archiveSession: (id: string, archived: boolean) => void;
   searchSessions: (query: string, limit?: number) => Promise<AiSessionSearchHit[]>;
+
+  // Attached-context actions
+  setAttachedContext: (sessionId: string, notes: Note[]) => void;
+  addAttachment: (sessionId: string, note: Note) => void;
+  removeAttachment: (sessionId: string, noteId: string) => void;
+  clearAttachments: (sessionId: string) => void;
+
+  /** Background LLM-inferred chat title. Fires once per session after the
+   *  first complete user→assistant exchange — calls the local LLM (cheap,
+   *  no cloud round-trip) with a tight "summarize in 3-6 words" prompt and
+   *  updates the session title via the existing rename path. Failures are
+   *  silent: the session keeps whatever title it had (the first-message
+   *  truncated fallback continues to work). */
+  inferTitleIfNeeded: (sessionId: string) => void;
 }
 
 function generateId(): string {
@@ -69,6 +100,57 @@ function deriveTitle(messages: ChatMessage[]): string {
   if (!first) return 'New Chat';
   const text = first.content.slice(0, 60);
   return text.length < first.content.length ? text + '...' : text;
+}
+
+// ── Attached context persistence (localStorage) ────────────────────────────
+const ATTACHED_KEY = 'ironmic-ai-attached-context';
+
+function loadAttachedContextMap(): Record<string, Note[]> {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(ATTACHED_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    // Light validation: must be an object of arrays. Drop anything weird so
+    // a corrupt entry can't crash hydrate.
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, Note[]> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (Array.isArray(v)) out[k] = v as Note[];
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveAttachedContextMap(map: Record<string, Note[]>) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(ATTACHED_KEY, JSON.stringify(map));
+  } catch (err) {
+    console.warn('[ai-chat] persisting attached context failed:', err);
+  }
+}
+
+// ── Title-inference prompt ────────────────────────────────────────────────
+const TITLE_SYSTEM_PROMPT =
+  'You generate concise chat titles. Output ONLY the title — 3-6 words, no quotes, no trailing punctuation, no preamble, no explanation. Use Title Case.';
+
+/** Trim model output to a usable title. Models sometimes wrap with quotes,
+ *  add a trailing period, or echo the prompt — strip those defensively. */
+function sanitizeInferredTitle(raw: string): string {
+  if (!raw) return '';
+  // Take only the first line — multi-line responses usually have the title
+  // first and then an explanation.
+  let t = raw.split('\n')[0].trim();
+  // Strip surrounding quotes and trailing terminal punctuation.
+  t = t.replace(/^["'`*\s]+|["'`*\s]+$/g, '');
+  t = t.replace(/[.!?,;:]+$/g, '');
+  // Reject anything that obviously isn't a title (too long, has "Title:" prefix).
+  t = t.replace(/^title[:\s-]+/i, '');
+  if (t.length > 60) t = t.slice(0, 60).trim();
+  return t;
 }
 
 const MIGRATED_FLAG = 'ironmic-ai-sessions-migrated';
@@ -215,10 +297,17 @@ export const useAiChatStore = create<AiChatStore>((set, get) => ({
   hydrated: false,
   hydrationError: null,
   closedForWrites: new Set(),
+  attachedContextBySession: loadAttachedContextMap(),
 
   activeSession: () => {
     const { sessions, activeSessionId } = get();
     return sessions.find((s) => s.id === activeSessionId) || null;
+  },
+
+  attachedForActive: () => {
+    const { activeSessionId, attachedContextBySession } = get();
+    if (!activeSessionId) return [];
+    return attachedContextBySession[activeSessionId] ?? [];
   },
 
   hydrate: async () => {
@@ -364,6 +453,13 @@ export const useAiChatStore = create<AiChatStore>((set, get) => ({
         console.error('[ai-chat] addMessage persist failed:', err);
       }
     });
+
+    // Kick off title inference once we've recorded the first assistant reply.
+    // Defers to a microtask so the user-facing message append finishes first
+    // (state is already set, we just don't want this to block the render).
+    if (message.role === 'assistant') {
+      queueMicrotask(() => get().inferTitleIfNeeded(sessionId));
+    }
   },
 
   deleteSession: (id) => {
@@ -371,7 +467,13 @@ export const useAiChatStore = create<AiChatStore>((set, get) => ({
     const activeSessionId = get().activeSessionId === id ? null : get().activeSessionId;
     const closedForWrites = new Set(get().closedForWrites);
     closedForWrites.add(id);
-    set({ sessions, activeSessionId, closedForWrites });
+
+    // Drop the deleted session's attachments from the map so localStorage
+    // doesn't accrete ghost entries for chats the user has thrown away.
+    const { [id]: _drop, ...remainingAttached } = get().attachedContextBySession;
+    saveAttachedContextMap(remainingAttached);
+
+    set({ sessions, activeSessionId, closedForWrites, attachedContextBySession: remainingAttached });
 
     // Tombstone runs at the tail of the queue — prior writes drain in order.
     enqueue(id, async () => {
@@ -442,6 +544,86 @@ export const useAiChatStore = create<AiChatStore>((set, get) => ({
       console.error('[ai-chat] search failed:', err);
       return [];
     }
+  },
+
+  // ── Attached-context actions ────────────────────────────────────────────
+
+  setAttachedContext: (sessionId, notes) => {
+    const map = { ...get().attachedContextBySession, [sessionId]: notes };
+    saveAttachedContextMap(map);
+    set({ attachedContextBySession: map });
+  },
+
+  addAttachment: (sessionId, note) => {
+    const current = get().attachedContextBySession[sessionId] ?? [];
+    // Idempotent: re-attaching an already-attached id is a no-op.
+    if (current.some((n) => n.id === note.id)) return;
+    get().setAttachedContext(sessionId, [...current, note]);
+  },
+
+  removeAttachment: (sessionId, noteId) => {
+    const current = get().attachedContextBySession[sessionId] ?? [];
+    get().setAttachedContext(
+      sessionId,
+      current.filter((n) => n.id !== noteId),
+    );
+  },
+
+  clearAttachments: (sessionId) => {
+    get().setAttachedContext(sessionId, []);
+  },
+
+  // ── Title inference ─────────────────────────────────────────────────────
+
+  inferTitleIfNeeded: (sessionId) => {
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+
+    // Only fire on the *first* complete exchange: exactly one user turn and
+    // exactly one assistant turn so far. Subsequent assistant replies skip
+    // (the title is already set).
+    const users = session.messages.filter((m) => m.role === 'user');
+    const asses = session.messages.filter((m) => m.role === 'assistant');
+    if (users.length !== 1 || asses.length !== 1) return;
+
+    const a = api();
+    if (!a?.generateTextLocal) return; // No local LLM bridge — fall back to derived title.
+
+    const userMsg = users[0];
+    const aiMsg = asses[0];
+
+    // Defensive trimming: long contexts can blow the small-model window,
+    // and the title model only needs the gist of each side.
+    const userExcerpt = userMsg.content.slice(0, 500);
+    const aiExcerpt = aiMsg.content.slice(0, 500);
+
+    void (async () => {
+      try {
+        const result = await a.generateTextLocal(
+          TITLE_SYSTEM_PROMPT,
+          `User asked:\n${userExcerpt}\n\nAssistant replied:\n${aiExcerpt}`,
+          { maxTokens: 24, temperature: 0.3 },
+        );
+        const raw = typeof result === 'string'
+          ? result
+          : (result?.text ?? '');
+        const title = sanitizeInferredTitle(raw);
+        if (title.length >= 3) {
+          // Only overwrite if the current title is the derived-from-first-
+          // message form or still "New Chat" — don't clobber a user rename.
+          const cur = get().sessions.find((s) => s.id === sessionId);
+          if (!cur) return;
+          const looksAutoderived =
+            cur.title === 'New Chat' ||
+            cur.title.startsWith(userMsg.content.slice(0, Math.min(20, userMsg.content.length)));
+          if (looksAutoderived) {
+            get().updateSessionTitle(sessionId, title);
+          }
+        }
+      } catch (err) {
+        console.warn('[ai-chat] title inference failed (keeping derived title):', err);
+      }
+    })();
   },
 }));
 
