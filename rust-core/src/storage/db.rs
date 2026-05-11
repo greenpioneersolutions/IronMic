@@ -7,7 +7,7 @@ use tracing::info;
 use crate::error::IronMicError;
 
 /// Schema version for migration tracking.
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 
 /// Get the platform-appropriate app data directory for IronMic.
 pub fn app_data_dir() -> PathBuf {
@@ -161,6 +161,10 @@ impl Database {
 
         if current_version < 12 {
             self.migrate_v12(&conn)?;
+        }
+
+        if current_version < 13 {
+            self.migrate_v13(&conn)?;
         }
 
         // Update version
@@ -873,6 +877,192 @@ impl Database {
         Ok(())
     }
 
+    /// Migration v13: Knowledge Q&A (RAG) layer.
+    ///
+    /// (Originally drafted as v10 in `feature/knowledge-qa-foundation`; main
+    /// landed three meeting-template migrations (v10/v11/v12) before this
+    /// merge, so the RAG migration is renumbered v13. The migration body is
+    /// unchanged.)
+    ///
+    /// Adds three things in one block so the new feature has everything it needs:
+    ///
+    /// 1. **user_notes / user_notebooks (+ FTS5)** — promotes user-authored notes
+    ///    from renderer localStorage to first-class SQLite citizens so RAG, full-text
+    ///    search, citations, and deeplinks can reference them. The renderer performs
+    ///    a one-shot localStorage→SQLite import guarded by the
+    ///    `notes_migrated_to_sqlite` setting flag.
+    /// 2. **chunks / chunks_fts** — retrievable units carved from entries, meetings,
+    ///    meeting transcript segments, and user notes. Chunk text is stored
+    ///    alongside its metadata so provenance display is instant and we never
+    ///    re-chunk on retrieval.
+    /// 3. **chunk_embeddings** — keyed by (chunk_id, model_version) so multiple
+    ///    embedding models can coexist during lazy migration. The legacy
+    ///    `embeddings` table (PK content_id+content_type) is left untouched; new
+    ///    chunk-level vectors live here. ON DELETE CASCADE keeps things tidy when
+    ///    a chunk is removed.
+    /// 4. **ai_chat_sessions.kind** — distinguishes regular chat from knowledge Q&A
+    ///    sessions without overloading `provider` (renderer types coerce unknown
+    ///    provider strings to null and would lose history rows). Defaults to
+    ///    `'chat'`; new Q&A turns persist as `'knowledge'`.
+    ///
+    /// Plus seeds the new RAG-related settings with privacy-safe defaults.
+    fn migrate_v13(&self, conn: &Connection) -> Result<(), IronMicError> {
+        // ── ai_chat_sessions.kind (defensive — check first so partial application
+        //    or future rebases over a hand-applied column don't error) ──
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(ai_chat_sessions)")
+            .map_err(|e| IronMicError::Storage(format!("Migration v13 prepare failed: {e}")))?;
+        let mut kind_exists = false;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| IronMicError::Storage(format!("Migration v13 query failed: {e}")))?;
+        for col in rows.flatten() {
+            if col == "kind" {
+                kind_exists = true;
+                break;
+            }
+        }
+        drop(stmt);
+
+        if !kind_exists {
+            conn.execute_batch(
+                "ALTER TABLE ai_chat_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';",
+            )
+            .map_err(|e| IronMicError::Storage(format!("Migration v13 kind ALTER failed: {e}")))?;
+        }
+
+        conn.execute_batch(
+            "
+            -- ── user_notes (replaces localStorage-backed useNotesStore) ──
+            CREATE TABLE IF NOT EXISTS user_notes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                polished_content TEXT,
+                display_mode TEXT NOT NULL DEFAULT 'raw',
+                notebook_id TEXT,
+                tags TEXT NOT NULL DEFAULT '[]',
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_notes_notebook ON user_notes(notebook_id);
+            CREATE INDEX IF NOT EXISTS idx_user_notes_updated ON user_notes(updated_at);
+
+            CREATE TABLE IF NOT EXISTS user_notebooks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                color TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            -- FTS5 over notes (mirrors entries_fts pattern)
+            CREATE VIRTUAL TABLE IF NOT EXISTS user_notes_fts USING fts5(
+                title,
+                content,
+                polished_content,
+                tags,
+                content='user_notes',
+                content_rowid='rowid'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS user_notes_ai AFTER INSERT ON user_notes BEGIN
+                INSERT INTO user_notes_fts(rowid, title, content, polished_content, tags)
+                VALUES (new.rowid, new.title, new.content, new.polished_content, new.tags);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS user_notes_ad AFTER DELETE ON user_notes BEGIN
+                INSERT INTO user_notes_fts(user_notes_fts, rowid, title, content, polished_content, tags)
+                VALUES ('delete', old.rowid, old.title, old.content, old.polished_content, old.tags);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS user_notes_au AFTER UPDATE ON user_notes BEGIN
+                INSERT INTO user_notes_fts(user_notes_fts, rowid, title, content, polished_content, tags)
+                VALUES ('delete', old.rowid, old.title, old.content, old.polished_content, old.tags);
+                INSERT INTO user_notes_fts(rowid, title, content, polished_content, tags)
+                VALUES (new.rowid, new.title, new.content, new.polished_content, new.tags);
+            END;
+
+            -- ── chunks (RAG retrievable units) ──
+            CREATE TABLE IF NOT EXISTS chunks (
+                id TEXT PRIMARY KEY,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                parent_id TEXT,
+                chunk_index INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                context_prefix TEXT,
+                char_start INTEGER,
+                char_end INTEGER,
+                start_ms INTEGER,
+                end_ms INTEGER,
+                speaker_label TEXT,
+                heading_path TEXT,
+                token_count INTEGER,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_type, source_id);
+            CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                text,
+                context_prefix,
+                content='chunks',
+                content_rowid='rowid'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, text, context_prefix)
+                VALUES (new.rowid, new.text, new.context_prefix);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, text, context_prefix)
+                VALUES ('delete', old.rowid, old.text, old.context_prefix);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, text, context_prefix)
+                VALUES ('delete', old.rowid, old.text, old.context_prefix);
+                INSERT INTO chunks_fts(rowid, text, context_prefix)
+                VALUES (new.rowid, new.text, new.context_prefix);
+            END;
+
+            -- ── chunk_embeddings (per-(chunk, model) Float32 BLOBs) ──
+            -- Distinct table from legacy `embeddings` so multiple model_versions can
+            -- coexist during lazy re-embedding migrations (legacy PK is
+            -- content_id+content_type, which clobbers older vectors on REPLACE).
+            CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                chunk_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                embedded_at TEXT NOT NULL,
+                PRIMARY KEY (chunk_id, model_version),
+                FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_model ON chunk_embeddings(model_version);
+
+            -- ── Knowledge Q&A settings (all opt-in / privacy-safe defaults) ──
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('knowledge_qa_enabled', 'true');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('knowledge_qa_allow_cloud', 'false');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('knowledge_qa_default_provider', 'auto');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('embedding_active_model', 'bge-small-en-v1.5');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('rag_chunk_size_tokens', '400');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('rag_chunk_overlap_tokens', '50');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('rag_contextual_prefix_enabled', 'true');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('rag_topic_k_local', '8');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('rag_topic_k_cloud', '30');
+            -- Renderer flips this to 'true' after the one-shot localStorage import.
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('notes_migrated_to_sqlite', 'false');
+            ",
+        )
+        .map_err(|e| IronMicError::Storage(format!("Migration v13 failed: {e}")))?;
+
+        info!("Migration v13 applied: user_notes + chunks + chunk_embeddings + ai_chat_sessions.kind + RAG settings");
+        Ok(())
+    }
+
     fn seed_builtin_templates(&self, conn: &Connection) -> Result<(), IronMicError> {
         let now = chrono::Utc::now().to_rfc3339();
         let templates = vec![
@@ -1261,6 +1451,111 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         // Running migrations again should be a no-op
         db.run_migrations().unwrap();
+    }
+
+    #[test]
+    fn migration_v13_creates_rag_tables_and_settings() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn();
+
+        // user_notes + user_notebooks + user_notes_fts exist
+        for table in &["user_notes", "user_notebooks", "user_notes_fts", "chunks", "chunks_fts", "chunk_embeddings"] {
+            let count: i32 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(count >= 1, "expected table or fts vtable {} to exist", table);
+        }
+
+        // ai_chat_sessions has the new `kind` column with default 'chat'
+        let mut stmt = conn.prepare("PRAGMA table_info(ai_chat_sessions)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(cols.contains(&"kind".to_string()), "ai_chat_sessions.kind missing");
+
+        // RAG settings seeded with privacy-safe defaults
+        let cloud_default: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='knowledge_qa_allow_cloud'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cloud_default, "false", "cloud Q&A must default to off");
+
+        let model_default: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='embedding_active_model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(model_default, "bge-small-en-v1.5");
+
+        let migrated: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='notes_migrated_to_sqlite'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated, "false", "renderer flips this after the one-shot import");
+    }
+
+    #[test]
+    fn user_notes_fts_roundtrip() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn();
+
+        // Insert a note via the trigger-fed path so FTS gets populated.
+        conn.execute(
+            "INSERT INTO user_notes (id, title, content, polished_content, display_mode, notebook_id, tags, is_pinned, created_at, updated_at)
+             VALUES ('n1', 'Auth migration', 'We will need to migrate auth before Q3', NULL, 'raw', NULL, '[]', 0, '2026-05-09T10:00:00Z', '2026-05-09T10:00:00Z')",
+            [],
+        ).unwrap();
+
+        let hits: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_notes_fts WHERE user_notes_fts MATCH 'auth migration'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "user_notes_fts should find the inserted note");
+    }
+
+    #[test]
+    fn chunk_embeddings_cascade_on_chunk_delete() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn();
+
+        conn.execute(
+            "INSERT INTO chunks (id, source_type, source_id, chunk_index, text, token_count, created_at)
+             VALUES ('c1', 'user_note', 'n1', 0, 'hello world', 2, '2026-05-09T10:00:00Z')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO chunk_embeddings (chunk_id, model_version, dim, embedding, embedded_at)
+             VALUES ('c1', 'bge-small-en-v1.5', 384, x'00', '2026-05-09T10:00:00Z')",
+            [],
+        ).unwrap();
+
+        // Deleting the chunk should cascade-delete its embedding via the FK.
+        conn.execute("DELETE FROM chunks WHERE id='c1'", []).unwrap();
+        let remaining: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id='c1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "ON DELETE CASCADE should remove the embedding");
     }
 
     #[test]

@@ -508,6 +508,34 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle('ironmic:run-auto-cleanup', () => native.addon.runAutoCleanup());
 
+  // User notes (Slice 0 — replaces localStorage-backed useNotesStore). All
+  // routes are simple addon pass-throughs; the optimistic-cache + queued-write
+  // semantic lives renderer-side so the UI stays synchronous.
+  ipcMain.handle(IPC_CHANNELS.USER_NOTES_CREATE, (_e, note) => native.addon.userNotesCreate(note));
+  ipcMain.handle(IPC_CHANNELS.USER_NOTES_GET, (_e, id: string) => native.addon.userNotesGet(id));
+  ipcMain.handle(IPC_CHANNELS.USER_NOTES_UPDATE, (_e, id: string, updates: any) =>
+    native.addon.userNotesUpdate(id, updates)
+  );
+  ipcMain.handle(IPC_CHANNELS.USER_NOTES_DELETE, (_e, id: string) =>
+    native.addon.userNotesDelete(id)
+  );
+  ipcMain.handle(IPC_CHANNELS.USER_NOTES_LIST, (_e, opts: any) =>
+    native.addon.userNotesList(opts)
+  );
+  ipcMain.handle(IPC_CHANNELS.USER_NOTES_BULK_IMPORT, (_e, payloadJson: string) =>
+    native.addon.userNotesBulkImport(payloadJson)
+  );
+  ipcMain.handle(IPC_CHANNELS.USER_NOTEBOOKS_CREATE, (_e, name: string, color: string) =>
+    native.addon.userNotebooksCreate(name, color)
+  );
+  ipcMain.handle(IPC_CHANNELS.USER_NOTEBOOKS_RENAME, (_e, id: string, name: string) =>
+    native.addon.userNotebooksRename(id, name)
+  );
+  ipcMain.handle(IPC_CHANNELS.USER_NOTEBOOKS_DELETE, (_e, id: string) =>
+    native.addon.userNotebooksDelete(id)
+  );
+  ipcMain.handle(IPC_CHANNELS.USER_NOTEBOOKS_LIST, () => native.addon.userNotebooksList());
+
   // Dictionary. After a mutation, broadcast `dictionary-changed` so any
   // renderer/main caches re-fetch their term list (used by transcript
   // post-correction). The Rust addon already pushes the change into the

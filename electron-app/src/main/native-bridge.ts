@@ -150,6 +150,46 @@ function createStubs(): Record<string, (...args: any[]) => any> {
     findLatestLocalSessionForRemote: () => 'null',
     getMaxMeetingSequence: () => 0,
     reopenMeetingSession: () => {},
+    // User notes (Slice 0 / migration v10). Stubs let dev mode work without
+    // a rebuilt addon; real implementations live in rust-core/src/storage/user_notes.rs.
+    userNotesCreate: (note: any) => ({
+      id: note.id ?? 'stub-note-' + Date.now(),
+      title: note.title ?? '',
+      content: note.content ?? '',
+      polishedContent: note.polishedContent ?? null,
+      displayMode: note.displayMode ?? 'raw',
+      notebookId: note.notebookId ?? null,
+      tags: note.tags ?? '[]',
+      isPinned: note.isPinned ?? false,
+      createdAt: note.createdAt ?? new Date().toISOString(),
+      updatedAt: note.updatedAt ?? new Date().toISOString(),
+    }),
+    userNotesGet: () => null,
+    userNotesUpdate: (id: string, updates: any) => ({
+      id,
+      title: '',
+      content: '',
+      polishedContent: null,
+      displayMode: 'raw',
+      notebookId: null,
+      tags: '[]',
+      isPinned: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...updates,
+    }),
+    userNotesDelete: () => {},
+    userNotesList: () => [],
+    userNotesBulkImport: () => 0,
+    userNotebooksCreate: (name: string, color: string) => ({
+      id: 'stub-nb-' + Date.now(),
+      name,
+      color,
+      createdAt: new Date().toISOString(),
+    }),
+    userNotebooksRename: () => {},
+    userNotebooksDelete: () => {},
+    userNotebooksList: () => [],
   };
 }
 

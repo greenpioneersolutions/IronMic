@@ -376,6 +376,20 @@ export const IPC_CHANNELS = {
   // Renderer→main handshake fired when a Forge dictation finishes (ok or
   // error) so main can clear `dictationOwner` and accept the next hotkey.
   FORGE_DICTATION_COMPLETE: 'ironmic:forge-dictation-complete',
+
+  // ── User Notes (Slice 0 of Knowledge Q&A — replaces localStorage-backed notes) ──
+  USER_NOTES_CREATE: 'ironmic:user-notes-create',
+  USER_NOTES_GET: 'ironmic:user-notes-get',
+  USER_NOTES_UPDATE: 'ironmic:user-notes-update',
+  USER_NOTES_DELETE: 'ironmic:user-notes-delete',
+  USER_NOTES_LIST: 'ironmic:user-notes-list',
+  /** One-shot localStorage→SQLite import; guarded renderer-side by the
+   *  `notes_migrated_to_sqlite` settings flag. */
+  USER_NOTES_BULK_IMPORT: 'ironmic:user-notes-bulk-import',
+  USER_NOTEBOOKS_CREATE: 'ironmic:user-notebooks-create',
+  USER_NOTEBOOKS_RENAME: 'ironmic:user-notebooks-rename',
+  USER_NOTEBOOKS_DELETE: 'ironmic:user-notebooks-delete',
+  USER_NOTEBOOKS_LIST: 'ironmic:user-notebooks-list',
 } as const;
 
 // ── Model hosting on GitHub Releases ──

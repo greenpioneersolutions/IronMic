@@ -6,6 +6,7 @@ pub mod hotkey;
 #[cfg(feature = "forge")]
 pub mod keystroke;
 pub mod llm;
+pub mod rag;
 pub mod storage;
 pub mod transcription;
 pub mod tts;
@@ -730,6 +731,430 @@ mod napi_exports {
             info!("Auto-cleanup removed {} entries", count);
         }
         Ok(count)
+    }
+
+    // ── User Notes N-API exports (Slice 0 — replaces localStorage-backed notes) ──
+
+    use crate::storage::user_notes::{
+        NewUserNote, UserNote, UserNoteListOptions, UserNoteStore, UserNoteUpdate, UserNotebook,
+    };
+
+    #[napi(object)]
+    pub struct JsUserNote {
+        pub id: String,
+        pub title: String,
+        pub content: String,
+        pub polished_content: Option<String>,
+        pub display_mode: String,
+        pub notebook_id: Option<String>,
+        pub tags: String,
+        pub is_pinned: bool,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+
+    impl From<UserNote> for JsUserNote {
+        fn from(n: UserNote) -> Self {
+            Self {
+                id: n.id,
+                title: n.title,
+                content: n.content,
+                polished_content: n.polished_content,
+                display_mode: n.display_mode,
+                notebook_id: n.notebook_id,
+                tags: n.tags,
+                is_pinned: n.is_pinned,
+                created_at: n.created_at,
+                updated_at: n.updated_at,
+            }
+        }
+    }
+
+    #[napi(object)]
+    pub struct JsUserNotebook {
+        pub id: String,
+        pub name: String,
+        pub color: String,
+        pub created_at: String,
+    }
+
+    impl From<UserNotebook> for JsUserNotebook {
+        fn from(n: UserNotebook) -> Self {
+            Self {
+                id: n.id,
+                name: n.name,
+                color: n.color,
+                created_at: n.created_at,
+            }
+        }
+    }
+
+    #[napi(object)]
+    pub struct JsNewUserNote {
+        pub id: Option<String>,
+        pub title: Option<String>,
+        pub content: Option<String>,
+        pub polished_content: Option<String>,
+        pub display_mode: Option<String>,
+        pub notebook_id: Option<String>,
+        pub tags: Option<String>,
+        pub is_pinned: Option<bool>,
+        pub created_at: Option<String>,
+        pub updated_at: Option<String>,
+    }
+
+    impl From<JsNewUserNote> for NewUserNote {
+        fn from(j: JsNewUserNote) -> Self {
+            Self {
+                id: j.id,
+                title: j.title,
+                content: j.content,
+                polished_content: j.polished_content,
+                display_mode: j.display_mode,
+                notebook_id: j.notebook_id,
+                tags: j.tags,
+                is_pinned: j.is_pinned,
+                created_at: j.created_at,
+                updated_at: j.updated_at,
+            }
+        }
+    }
+
+    /// Partial-update payload. Each Option<T> field has the standard "absent = leave
+    /// alone, present = set to this" semantic. For nullable columns we still take
+    /// Option<String> on the JS side and treat the empty string as "clear" — the
+    /// renderer never needs to send a literal SQL NULL for these and avoiding the
+    /// Option<Option<String>> wart keeps the TypeScript surface simple.
+    #[napi(object)]
+    pub struct JsUserNoteUpdate {
+        pub title: Option<String>,
+        pub content: Option<String>,
+        pub polished_content: Option<String>, // empty string ⇒ clear
+        pub display_mode: Option<String>,
+        pub notebook_id: Option<String>, // empty string ⇒ clear (move to uncategorized)
+        pub tags: Option<String>,
+        pub is_pinned: Option<bool>,
+    }
+
+    fn map_nullable(s: Option<String>) -> Option<Option<String>> {
+        s.map(|v| if v.is_empty() { None } else { Some(v) })
+    }
+
+    #[napi(object)]
+    pub struct JsUserNoteListOptions {
+        pub limit: u32,
+        pub offset: u32,
+        pub notebook_id: Option<String>,
+        pub search: Option<String>,
+    }
+
+    #[napi]
+    pub fn user_notes_create(note: JsNewUserNote) -> napi::Result<JsUserNote> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        store.create(note.into()).map(Into::into).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notes_get(id: String) -> napi::Result<Option<JsUserNote>> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        store.get(&id).map(|o| o.map(Into::into)).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notes_update(id: String, updates: JsUserNoteUpdate) -> napi::Result<JsUserNote> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        let upd = UserNoteUpdate {
+            title: updates.title,
+            content: updates.content,
+            polished_content: map_nullable(updates.polished_content),
+            display_mode: updates.display_mode,
+            notebook_id: map_nullable(updates.notebook_id),
+            tags: updates.tags,
+            is_pinned: updates.is_pinned,
+        };
+        store.update(&id, upd).map(Into::into).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notes_delete(id: String) -> napi::Result<()> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        store.delete(&id).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notes_list(opts: JsUserNoteListOptions) -> napi::Result<Vec<JsUserNote>> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        let o = UserNoteListOptions {
+            limit: opts.limit,
+            offset: opts.offset,
+            notebook_id: opts.notebook_id,
+            search: opts.search,
+        };
+        store
+            .list(o)
+            .map(|v| v.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
+    /// One-shot localStorage → SQLite import. Renderer reads its old
+    /// `ironmic-notes` + `ironmic-notebooks` localStorage keys, JSON-encodes
+    /// them as `{notes: [...], notebooks: [...]}` and calls this exactly once
+    /// (guarded by the `notes_migrated_to_sqlite` setting flag). Idempotent:
+    /// uses INSERT OR IGNORE so a partial-completion re-run won't duplicate.
+    /// Returns the number of note rows considered (not actual inserts — that
+    /// distinction is documented in `UserNoteStore::bulk_import`).
+    #[napi]
+    pub fn user_notes_bulk_import(payload_json: String) -> napi::Result<u32> {
+        #[derive(serde::Deserialize)]
+        struct Payload {
+            notes: Vec<JsNewUserNote>,
+            notebooks: Vec<JsUserNotebook>,
+        }
+        let payload: Payload = serde_json::from_str(&payload_json).map_err(|e| {
+            napi::Error::from_reason(format!("Invalid bulk import payload JSON: {e}"))
+        })?;
+
+        // Hand-translate JsUserNotebook -> UserNotebook since we don't impl From
+        // for it (the other direction was enough).
+        let books: Vec<UserNotebook> = payload
+            .notebooks
+            .into_iter()
+            .map(|nb| UserNotebook {
+                id: nb.id,
+                name: nb.name,
+                color: nb.color,
+                created_at: nb.created_at,
+            })
+            .collect();
+        let notes: Vec<NewUserNote> = payload.notes.into_iter().map(Into::into).collect();
+
+        let store = UserNoteStore::new(DATABASE.clone());
+        store.bulk_import(notes, books).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notebooks_create(name: String, color: String) -> napi::Result<JsUserNotebook> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        store
+            .create_notebook(&name, &color)
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notebooks_rename(id: String, name: String) -> napi::Result<()> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        store.rename_notebook(&id, &name).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notebooks_delete(id: String) -> napi::Result<()> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        store.delete_notebook(&id).map_err(Into::into)
+    }
+
+    #[napi]
+    pub fn user_notebooks_list() -> napi::Result<Vec<JsUserNotebook>> {
+        let store = UserNoteStore::new(DATABASE.clone());
+        store
+            .list_notebooks()
+            .map(|v| v.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
+    // ── Chunks / chunk_embeddings N-API exports (RAG core) ──
+    //
+    // These are the storage-layer primitives consumed by the renderer-side
+    // EmbedderRunner (drains unembedded chunks, embeds via BGE, writes back)
+    // and by the Rust-side retrieval engine (loads chunk_embeddings for the
+    // active model into a SIMD-friendly contiguous buffer at startup).
+    //
+    // The chunker itself lives in `rag::chunker` and uses ChunkStore::
+    // replace_for_source directly — there's no N-API call for "chunk this
+    // document" yet; that will be added in Slice C when the chunker module
+    // lands.
+
+    use crate::storage::chunks::{ChunkStore, source_types as chunk_source_types};
+    use napi::bindgen_prelude::Buffer as NapiBuffer;
+
+    /// `ragGetUnembeddedChunks(limit, modelVersion)` returns up to `limit`
+    /// chunks lacking an embedding for `modelVersion`, ordered newest-first.
+    /// The renderer feeds these through BgeEmbedder and writes results back
+    /// via `ragStoreChunkEmbeddings`.
+    #[napi]
+    pub fn rag_get_unembedded_chunks(
+        limit: u32,
+        model_version: String,
+    ) -> napi::Result<String> {
+        let store = ChunkStore::new(DATABASE.clone());
+        let rows = store
+            .list_unembedded(limit, &model_version)
+            .map_err(napi::Error::from)?;
+        #[derive(serde::Serialize)]
+        struct Row {
+            chunk_id: String,
+            text: String,
+            context_prefix: Option<String>,
+        }
+        let out: Vec<Row> = rows
+            .into_iter()
+            .map(|(id, text, prefix)| Row { chunk_id: id, text, context_prefix: prefix })
+            .collect();
+        serde_json::to_string(&out)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to serialize rows: {e}")))
+    }
+
+    /// Packed binary layout for batch embedding writes:
+    ///   [count: u32]
+    ///   for each item:
+    ///     [chunk_id_len: u32][chunk_id: utf8 bytes]
+    ///     [emb_len: u32][emb: u32 little-endian Float32 bytes]
+    /// All integers are little-endian. Mirrors the equivalent format that
+    /// `getAllEmbeddingsWithData` produces in the other direction so the
+    /// renderer can reuse one shared (de)serializer.
+    fn parse_packed_chunk_embeddings(
+        bytes: &[u8],
+    ) -> Result<Vec<(String, Vec<u8>)>, String> {
+        if bytes.len() < 4 {
+            return Err("buffer too short for count header".into());
+        }
+        let mut off = 0usize;
+        let read_u32 = |b: &[u8], off: &mut usize| -> Result<u32, String> {
+            if b.len() < *off + 4 {
+                return Err("truncated u32".into());
+            }
+            let n = u32::from_le_bytes([b[*off], b[*off + 1], b[*off + 2], b[*off + 3]]);
+            *off += 4;
+            Ok(n)
+        };
+        let count = read_u32(bytes, &mut off)? as usize;
+        let mut out: Vec<(String, Vec<u8>)> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id_len = read_u32(bytes, &mut off)? as usize;
+            if bytes.len() < off + id_len {
+                return Err("truncated chunk_id".into());
+            }
+            let id = std::str::from_utf8(&bytes[off..off + id_len])
+                .map_err(|e| format!("invalid utf-8 chunk_id: {e}"))?
+                .to_string();
+            off += id_len;
+            let emb_len = read_u32(bytes, &mut off)? as usize;
+            if bytes.len() < off + emb_len {
+                return Err("truncated embedding".into());
+            }
+            let emb = bytes[off..off + emb_len].to_vec();
+            off += emb_len;
+            out.push((id, emb));
+        }
+        Ok(out)
+    }
+
+    #[napi]
+    pub fn rag_store_chunk_embeddings(
+        items_buffer: NapiBuffer,
+        model_version: String,
+        dim: u32,
+    ) -> napi::Result<u32> {
+        let items = parse_packed_chunk_embeddings(items_buffer.as_ref())
+            .map_err(|e| napi::Error::from_reason(format!("Invalid packed buffer: {e}")))?;
+        let store = ChunkStore::new(DATABASE.clone());
+        store
+            .store_chunk_embeddings_batch(&items, &model_version, dim as i64)
+            .map_err(Into::into)
+    }
+
+    /// JSON-encoded stats — `{active_model, total_chunks, indexed_chunks, by_source_type: {...}}`.
+    /// Read by the Settings → Knowledge Q&A panel and the Ask page's
+    /// "Indexed Nm ago" pill.
+    #[napi]
+    pub fn rag_get_index_stats() -> napi::Result<String> {
+        let settings = SettingsStore::new(DATABASE.clone());
+        let active = settings
+            .get("embedding_active_model")
+            .map_err(napi::Error::from)?
+            .unwrap_or_else(|| "bge-small-en-v1.5".into());
+
+        let store = ChunkStore::new(DATABASE.clone());
+        let (by_source, total, indexed) = store.stats(&active).map_err(napi::Error::from)?;
+        #[derive(serde::Serialize)]
+        struct Stats {
+            active_model: String,
+            total_chunks: i64,
+            indexed_chunks: i64,
+            by_source_type: std::collections::BTreeMap<String, i64>,
+        }
+        let mut bs: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        for (k, v) in by_source {
+            bs.insert(k, v);
+        }
+        let stats = Stats {
+            active_model: active,
+            total_chunks: total,
+            indexed_chunks: indexed,
+            by_source_type: bs,
+        };
+        serde_json::to_string(&stats)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to serialize stats: {e}")))
+    }
+
+    /// Delete every chunk for a single source. Used when an entry/meeting/note
+    /// is removed so its chunks (and via FK cascade, its embeddings) don't
+    /// linger as stale retrieval hits. `source_type` must be one of the
+    /// constants in `rag::chunks::source_types`.
+    #[napi]
+    pub fn rag_delete_chunks_for_source(
+        source_type: String,
+        source_id: String,
+    ) -> napi::Result<u32> {
+        // Validate up front so the renderer can't accidentally smuggle a typo
+        // through and silently retain stale chunks.
+        match source_type.as_str() {
+            chunk_source_types::ENTRY
+            | chunk_source_types::MEETING
+            | chunk_source_types::MEETING_SEGMENT
+            | chunk_source_types::USER_NOTE => {}
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "Unknown chunk source_type: {other}"
+                )));
+            }
+        }
+        let store = ChunkStore::new(DATABASE.clone());
+        store
+            .delete_for_source(&source_type, &source_id)
+            .map_err(Into::into)
+    }
+
+    /// Wipe every chunk + cascade-delete every chunk embedding. Backs
+    /// Settings → "Reset index". Returns the number of chunks deleted.
+    #[napi]
+    pub fn rag_rebuild_index() -> napi::Result<u32> {
+        let store = ChunkStore::new(DATABASE.clone());
+        store.delete_all().map_err(Into::into)
+    }
+
+    /// Update the active embedding model id. Queries filter on this so the
+    /// indexer can drain the new model's backlog in the background without
+    /// disturbing live retrieval against the old model.
+    #[napi]
+    pub fn rag_set_active_model(model_version: String) -> napi::Result<()> {
+        let settings = SettingsStore::new(DATABASE.clone());
+        settings
+            .set("embedding_active_model", &model_version)
+            .map_err(Into::into)
+    }
+
+    /// Classify a query into one of {Temporal, SingleDoc, CrossDoc, Topic}.
+    /// Renderer surfaces the returned `scope_label` above the answer as the
+    /// "Considering N items from <range>" subheader. The full retrieval
+    /// pipeline (`ragRetrieveHybrid`) also consumes this internally; the
+    /// standalone export here lets the UI render the scope hint before
+    /// retrieval starts so the user sees what we'll search.
+    #[napi]
+    pub fn rag_classify_intent(query: String) -> napi::Result<String> {
+        let result = crate::rag::intent::classify(&query, chrono::Utc::now());
+        serde_json::to_string(&result)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to serialize intent: {e}")))
     }
 
     // ── Dictionary N-API exports ──

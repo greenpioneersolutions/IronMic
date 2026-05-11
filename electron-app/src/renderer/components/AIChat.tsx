@@ -180,6 +180,38 @@ export function AIChat() {
       sessionId = createSession(provider);
     }
 
+    // ── Effective provider, gated for the attached-notes case ──
+    //
+    // Until the full Knowledge Q&A pipeline lands (Slices B/D/E/F), the
+    // attach-note button still routes through the regular `aiSendMessage`
+    // path. But that path historically shipped the entire note body to
+    // whatever provider was selected — including cloud CLIs — with no
+    // user-visible privacy opt-in. The `knowledge_qa_allow_cloud` setting
+    // (introduced in migration v10) closes this leak: if the user has
+    // attached notes AND a cloud provider is selected, we require the
+    // explicit Q&A cloud opt-in. When the gate is off we silently fall
+    // back to local and show a small note in the assistant message.
+    //
+    // Plain chat (no attached notes) is unaffected — that's covered by the
+    // existing `voice_chat_allow_cloud` gating for the voice path and the
+    // user's `ai_provider` selection generally.
+    let effectiveProvider: AIProvider = provider;
+    let cloudGateApplied = false;
+    if (attachedNotes.length > 0 && (provider === 'claude' || provider === 'copilot')) {
+      try {
+        const gate = await window.ironmic.getSetting('knowledge_qa_allow_cloud');
+        if (gate !== 'true') {
+          effectiveProvider = 'local';
+          cloudGateApplied = true;
+        }
+      } catch {
+        // If the setting read fails we default to the safer choice — local —
+        // since we can't confirm the user opted in to cloud Q&A.
+        effectiveProvider = 'local';
+        cloudGateApplied = true;
+      }
+    }
+
     // Build prompt with attached notes as context
     let fullPrompt = text;
     if (attachedNotes.length > 0) {
@@ -217,7 +249,7 @@ export function AIChat() {
         window.ironmic.getSetting('ai_local_model'),
       ]);
       let modelId: string | undefined;
-      if (provider === 'local') {
+      if (effectiveProvider === 'local') {
         const candidate = localModel || genericModel;
         modelId = candidate && candidate.startsWith('llm') ? candidate : undefined;
       } else {
@@ -235,13 +267,27 @@ export function AIChat() {
             .slice(-20)
             .map((m) => ({ role: m.role, content: m.content }))
         : undefined;
-      const response = await window.ironmic.aiSendMessage(fullPrompt, provider, modelId, sessionId, priorMessages);
+      const response = await window.ironmic.aiSendMessage(fullPrompt, effectiveProvider, modelId, sessionId, priorMessages);
+
+      // When the cloud gate forced a fallback to local, surface that to the
+      // user as a small system message before the assistant turn so they
+      // know why their selected provider didn't run. The setting deep-link
+      // lets them flip the gate without hunting through preferences.
+      if (cloudGateApplied) {
+        const gateMsg: ChatMessage = {
+          id: (Date.now() - 1).toString(),
+          role: 'system',
+          content: `Attached notes were processed locally because Cloud Q&A is off. Enable it in Settings → Privacy if you want to send note context to your cloud provider.`,
+          timestamp: Date.now(),
+        };
+        addMessage(sessionId, gateMsg);
+      }
 
       const assistantMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
         content: response,
-        provider,
+        provider: effectiveProvider,
         timestamp: Date.now(),
       };
       addMessage(sessionId, assistantMsg);

@@ -72,6 +72,27 @@ const api = {
   deleteEntriesOlderThan: (days: number) => ipcRenderer.invoke('ironmic:delete-entries-older-than', days),
   runAutoCleanup: () => ipcRenderer.invoke('ironmic:run-auto-cleanup'),
 
+  // ── User Notes (Slice 0 of Knowledge Q&A — SQLite-backed, replaces localStorage) ──
+  // The renderer-side useNotesStore wraps these with an optimistic in-memory cache
+  // + per-id serial write queue so the public store interface stays synchronous.
+  userNotesCreate: (note: any) => ipcRenderer.invoke('ironmic:user-notes-create', note),
+  userNotesGet: (id: string) => ipcRenderer.invoke('ironmic:user-notes-get', id),
+  userNotesUpdate: (id: string, updates: any) =>
+    ipcRenderer.invoke('ironmic:user-notes-update', id, updates),
+  userNotesDelete: (id: string) => ipcRenderer.invoke('ironmic:user-notes-delete', id),
+  userNotesList: (opts: { notebookId?: string; search?: string; limit: number; offset: number }) =>
+    ipcRenderer.invoke('ironmic:user-notes-list', opts),
+  /** One-shot localStorage → SQLite import. payloadJson = JSON-encoded
+   *  `{notes: [...], notebooks: [...]}`. Idempotent (INSERT OR IGNORE inside). */
+  userNotesBulkImport: (payloadJson: string) =>
+    ipcRenderer.invoke('ironmic:user-notes-bulk-import', payloadJson),
+  userNotebooksCreate: (name: string, color: string) =>
+    ipcRenderer.invoke('ironmic:user-notebooks-create', name, color),
+  userNotebooksRename: (id: string, name: string) =>
+    ipcRenderer.invoke('ironmic:user-notebooks-rename', id, name),
+  userNotebooksDelete: (id: string) => ipcRenderer.invoke('ironmic:user-notebooks-delete', id),
+  userNotebooksList: () => ipcRenderer.invoke('ironmic:user-notebooks-list'),
+
   tagUntaggedEntries: (sourceApp: string) => ipcRenderer.invoke('ironmic:tag-untagged-entries', sourceApp),
 
   // Dictionary
