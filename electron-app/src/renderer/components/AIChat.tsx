@@ -212,13 +212,22 @@ export function AIChat() {
       }
     }
 
-    // Build prompt with attached notes as context
+    // Build prompt with attached items as context. Picker emits prefixed ids
+    // for dictations and meetings; we label the block accordingly so the LLM
+    // knows what kind of source it's reading (raw dictation may be rough vs.
+    // a polished meeting summary). The block format is otherwise identical
+    // to keep prompt diffs minimal.
     let fullPrompt = text;
     if (attachedNotes.length > 0) {
-      const context = attachedNotes.map((n) =>
-        `[Note: ${n.title || 'Untitled'}]\n${n.content}`
-      ).join('\n\n');
-      fullPrompt = `Context from my notes:\n\n${context}\n\n---\n\n${text}`;
+      const context = attachedNotes.map((n) => {
+        const kindLabel = n.id.startsWith('dictation:')
+          ? 'Dictation'
+          : n.id.startsWith('meeting:')
+            ? 'Meeting'
+            : 'Note';
+        return `[${kindLabel}: ${n.title || 'Untitled'}]\n${n.content}`;
+      }).join('\n\n');
+      fullPrompt = `Context from my IronMic:\n\n${context}\n\n---\n\n${text}`;
       setAttachedNotes([]); // Clear after sending
     }
 
@@ -801,17 +810,43 @@ export function AIChat() {
             </div>
           )}
 
-          {/* Attached notes preview */}
+          {/* Attached context preview — notes, dictations, and meetings all
+              land here as Note-shaped objects. The picker prefixes synthetic
+              ids with `dictation:` / `meeting:` (plain ids = notes), which we
+              decode here to render the right icon + color so the user can
+              tell at a glance what each chip represents. */}
           {attachedNotes.length > 0 && (
             <div className="flex items-center gap-1.5 mb-2 flex-wrap">
               <span className="text-[10px] text-iron-text-muted">Context:</span>
-              {attachedNotes.map((n) => (
-                <span key={n.id} className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/15">
-                  <StickyNote className="w-2.5 h-2.5" />
-                  {n.title || 'Untitled'}
-                  <button onClick={() => setAttachedNotes((prev) => prev.filter((x) => x.id !== n.id))} className="ml-0.5 hover:text-iron-danger"><X className="w-2.5 h-2.5" /></button>
-                </span>
-              ))}
+              {attachedNotes.map((n) => {
+                const kind: 'note' | 'dictation' | 'meeting' = n.id.startsWith('dictation:')
+                  ? 'dictation'
+                  : n.id.startsWith('meeting:')
+                    ? 'meeting'
+                    : 'note';
+                const palette =
+                  kind === 'dictation' ? 'bg-iron-accent/15 text-iron-accent-light border-iron-accent/20'
+                  : kind === 'meeting'  ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/15';
+                const Icon = kind === 'dictation' ? Mic : kind === 'meeting' ? MessageSquare : StickyNote;
+                return (
+                  <span
+                    key={n.id}
+                    className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border ${palette}`}
+                    title={`${kind === 'note' ? 'Note' : kind === 'dictation' ? 'Dictation' : 'Meeting'}: ${n.title || 'Untitled'}`}
+                  >
+                    <Icon className="w-2.5 h-2.5" />
+                    {n.title || 'Untitled'}
+                    <button
+                      onClick={() => setAttachedNotes((prev) => prev.filter((x) => x.id !== n.id))}
+                      className="ml-0.5 hover:text-iron-danger"
+                      aria-label={`Detach ${n.title || 'item'}`}
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </span>
+                );
+              })}
             </div>
           )}
 

@@ -1,58 +1,244 @@
-import { useState, useMemo } from 'react';
-import { Search, StickyNote, BookOpen, Pin, Hash, Check, X } from 'lucide-react';
+import { useState, useMemo, useEffect } from 'react';
+import { Search, StickyNote, BookOpen, Pin, Check, Mic, Users } from 'lucide-react';
 import { useNotesStore, type Note, type Notebook } from '../stores/useNotesStore';
+import { useEntryStore } from '../stores/useEntryStore';
+import { useMeetingStore } from '../stores/useMeetingStore';
+import type { Entry } from '../types';
 import { Modal } from './ui';
 
 interface NotePickerModalProps {
   open: boolean;
   onClose: () => void;
+  /** Receives a Note-shaped object regardless of which source the user picked.
+   *  Dictation entries and meeting summaries are adapted to this shape so the
+   *  AIChat attached-context flow stays uniform — the LLM prompt block format
+   *  (`[Note: <title>]\n<content>`) is just as legible whether the body came
+   *  from a manual note, a Whisper transcript, or a meeting summary. */
   onSelect: (note: Note) => void;
   selectedIds?: Set<string>;
 }
 
+/** Source type for an attachable item. Used internally by the picker to
+ *  render a small badge and to choose a tab; the `Note` shape handed back
+ *  to AIChat doesn't carry this. */
+type Kind = 'note' | 'dictation' | 'meeting';
+
+interface PickerItem {
+  id: string;
+  kind: Kind;
+  title: string;
+  /** Short preview (≤ 60 chars) shown under the title in the list. */
+  preview: string;
+  /** Full body that becomes the prompt context when attached. */
+  body: string;
+  /** Unix ms — drives Recent sort. */
+  updatedAt: number;
+  /** For notes: parent notebook id (Notebooks tab grouping). */
+  notebookId?: string | null;
+  isPinned?: boolean;
+  tags?: string[];
+}
+
+// ── Adapters: source store row → uniform PickerItem ────────────────────────
+
+function noteToItem(n: Note): PickerItem {
+  return {
+    id: n.id,
+    kind: 'note',
+    title: n.title || 'Untitled',
+    preview: (n.content || '').slice(0, 80).replace(/\n/g, ' '),
+    body: (n.polishedContent && n.displayMode === 'polished') ? n.polishedContent : n.content,
+    updatedAt: n.updatedAt,
+    notebookId: n.notebookId,
+    isPinned: n.isPinned,
+    tags: n.tags,
+  };
+}
+
+/** A title-less dictation entry needs SOMETHING the user recognizes. Use the
+ *  first ~40 chars of the polished text (or raw if no polish), trimmed at a
+ *  word boundary where possible. */
+function entryTitle(e: Entry): string {
+  const body = (e.polishedText && e.displayMode === 'polished' ? e.polishedText : e.rawTranscript) || '';
+  if (!body.trim()) return 'Empty dictation';
+  const flat = body.replace(/\s+/g, ' ').trim();
+  if (flat.length <= 50) return flat;
+  // Cut at last space before 50 chars to avoid mid-word.
+  const slice = flat.slice(0, 50);
+  const lastSpace = slice.lastIndexOf(' ');
+  return (lastSpace > 20 ? slice.slice(0, lastSpace) : slice) + '…';
+}
+
+function entryToItem(e: Entry): PickerItem {
+  const body = (e.polishedText && e.displayMode === 'polished' ? e.polishedText : e.rawTranscript) || '';
+  return {
+    id: e.id,
+    kind: 'dictation',
+    title: entryTitle(e),
+    preview: body.slice(0, 80).replace(/\n/g, ' '),
+    body,
+    updatedAt: Date.parse(e.updatedAt) || Date.parse(e.createdAt) || Date.now(),
+    isPinned: e.isPinned,
+  };
+}
+
+interface MeetingSessionLike {
+  id: string;
+  started_at?: string;
+  ended_at?: string;
+  summary?: string;
+  action_items?: string;
+  structured_output?: string;
+}
+
+function meetingTitle(m: MeetingSessionLike): string {
+  // structured_output sometimes carries a generated title; otherwise fall
+  // back to a date stamp ("Meeting — May 8 14:30").
+  try {
+    if (m.structured_output) {
+      const so = JSON.parse(m.structured_output);
+      if (typeof so?.plainSummary === 'string' && so.plainSummary.trim()) {
+        return so.plainSummary.split(/[.\n]/)[0].slice(0, 60).trim() || 'Meeting';
+      }
+      if (typeof so?.title === 'string' && so.title.trim()) return so.title.trim();
+    }
+  } catch { /* fall through */ }
+  if (m.started_at) {
+    const d = new Date(m.started_at);
+    if (!isNaN(d.getTime())) {
+      return `Meeting — ${d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+    }
+  }
+  return 'Meeting';
+}
+
+function meetingToItem(m: MeetingSessionLike): PickerItem {
+  // Body = best-available textual representation in priority order:
+  //   structured_output.plainSummary > summary > action_items > "".
+  // We deliberately skip full_transcript here — meetings can run an hour
+  // and stuffing the entire transcript into a chat prompt blows the
+  // context window. When the real RAG retrieval layer lands (Slice E)
+  // it'll surface the relevant chunks instead.
+  let body = '';
+  try {
+    if (m.structured_output) {
+      const so = JSON.parse(m.structured_output);
+      if (typeof so?.plainSummary === 'string') body = so.plainSummary;
+      else if (typeof so?.markdown === 'string') body = so.markdown;
+    }
+  } catch { /* fall through */ }
+  if (!body && m.summary) body = m.summary;
+  if (!body && m.action_items) body = `Action items:\n${m.action_items}`;
+
+  return {
+    id: m.id,
+    kind: 'meeting',
+    title: meetingTitle(m),
+    preview: body.slice(0, 80).replace(/\n/g, ' ') || 'No summary yet',
+    body: body || meetingTitle(m),
+    updatedAt: Date.parse(m.ended_at ?? m.started_at ?? '') || Date.now(),
+  };
+}
+
+/** Synthesize a Note-shaped object from a PickerItem so AIChat's existing
+ *  `attachedNotes: Note[]` state (and the prompt block builder around it)
+ *  works without any consumer-side changes. The synthetic note's id is
+ *  prefixed by kind so dedupe across the three sources never collides
+ *  (e.g. an entry and a note sharing a UUID — unlikely but possible). */
+function itemToNote(item: PickerItem): Note {
+  const now = Date.now();
+  const prefixedId = item.kind === 'note' ? item.id : `${item.kind}:${item.id}`;
+  return {
+    id: prefixedId,
+    title: item.title,
+    content: item.body,
+    polishedContent: null,
+    displayMode: 'raw',
+    notebookId: item.notebookId ?? null,
+    tags: item.tags ?? [],
+    isPinned: !!item.isPinned,
+    createdAt: item.updatedAt || now,
+    updatedAt: item.updatedAt || now,
+  };
+}
+
 export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePickerModalProps) {
   const [query, setQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'recent' | 'notebooks' | 'search'>('recent');
+  type Tab = 'recent' | 'notes' | 'dictations' | 'meetings';
+  const [activeTab, setActiveTab] = useState<Tab>('recent');
 
   const notes = useNotesStore((s) => s.notes);
   const notebooks = useNotesStore((s) => s.notebooks);
+  const entries = useEntryStore((s) => s.entries);
+  const loadEntries = useEntryStore((s) => s.loadEntries);
+  const meetingSessions = useMeetingStore((s) => s.sessions);
+  const loadMeetings = useMeetingStore((s) => s.loadSessions);
 
-  const recentNotes = useMemo(() =>
-    [...notes].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10),
-    [notes]
+  // Lazy-load entries and meetings the first time the picker opens. If the
+  // user came straight to AIChat without visiting Timeline / Meetings, these
+  // stores start empty and the relevant tabs would look misleadingly bare.
+  useEffect(() => {
+    if (!open) return;
+    if (entries.length === 0) void loadEntries({ limit: 50, offset: 0 } as any);
+    if (meetingSessions.length === 0) void loadMeetings();
+    // Intentionally NOT depending on `entries.length` / `meetingSessions.length`
+    // here — we only want one fire on open, not re-fires while results stream in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Map each source to PickerItems once per source change.
+  const noteItems = useMemo(() => notes.map(noteToItem), [notes]);
+  const entryItems = useMemo(() => entries.map(entryToItem), [entries]);
+  const meetingItems = useMemo(
+    () => (meetingSessions as MeetingSessionLike[]).map(meetingToItem),
+    [meetingSessions],
   );
+
+  const allItems = useMemo(
+    () => [...noteItems, ...entryItems, ...meetingItems],
+    [noteItems, entryItems, meetingItems],
+  );
+
+  // What feeds the current tab BEFORE search filtering. Recent mixes all
+  // three and sorts by updatedAt; the dedicated tabs are kind-filtered.
+  const baseItems: PickerItem[] = useMemo(() => {
+    if (activeTab === 'recent') {
+      return [...allItems].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 30);
+    }
+    if (activeTab === 'notes') return noteItems;
+    if (activeTab === 'dictations') return entryItems;
+    if (activeTab === 'meetings') return meetingItems;
+    return [];
+  }, [activeTab, allItems, noteItems, entryItems, meetingItems]);
 
   const searchResults = useMemo(() => {
     if (!query.trim()) return [];
     const q = query.toLowerCase();
-    return notes.filter((n) =>
-      n.title.toLowerCase().includes(q) ||
-      n.content.toLowerCase().includes(q) ||
-      n.tags.some((t) => t.toLowerCase().includes(q))
-    ).slice(0, 20);
-  }, [query, notes]);
+    // Search ALL items regardless of tab so the user gets a unified
+    // result set when they type — matches Mem / Reflect behavior.
+    return allItems.filter((it) =>
+      it.title.toLowerCase().includes(q) ||
+      it.body.toLowerCase().includes(q) ||
+      (it.tags ?? []).some((t) => t.toLowerCase().includes(q))
+    ).slice(0, 30);
+  }, [query, allItems]);
 
+  // Notebooks tab grouping (only notes have notebook membership).
   const notebookNotes = useMemo(() => {
-    const map: Record<string, Note[]> = { uncategorized: [] };
+    const map: Record<string, PickerItem[]> = { uncategorized: [] };
     for (const nb of notebooks) map[nb.id] = [];
-    for (const note of notes) {
-      const key = note.notebookId || 'uncategorized';
+    for (const it of noteItems) {
+      const key = it.notebookId || 'uncategorized';
       if (!map[key]) map[key] = [];
-      map[key].push(note);
+      map[key].push(it);
     }
     return map;
-  }, [notes, notebooks]);
+  }, [noteItems, notebooks]);
 
   if (!open) return null;
 
   return (
-    // NotePickerModal already early-returns null when its `open` is false, so
-    // by the time we render the inner Modal `open` is unconditionally true.
-    // Omitting this prop made the underlying Modal silently return null
-    // (its body has its own `if (!open) return null` gate at Modal.tsx:25),
-    // which manifested as "the attach-note button does nothing" — the button
-    // toggled showNotePicker correctly but the Modal never mounted.
-    <Modal open onClose={onClose} title="Add Note as Context">
+    <Modal open onClose={onClose} title="Add Context">
       <div className="w-[480px] max-h-[60vh] flex flex-col">
         {/* Search */}
         <div className="px-4 pt-3 pb-2">
@@ -60,8 +246,8 @@ export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePi
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-iron-text-muted" />
             <input
               value={query}
-              onChange={(e) => { setQuery(e.target.value); if (e.target.value) setActiveTab('search'); else setActiveTab('recent'); }}
-              placeholder="Search notes by title, content, or tag..."
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search notes, dictations, and meetings..."
               className="w-full text-xs bg-iron-bg border border-iron-border rounded-lg pl-8 pr-3 py-2 text-iron-text placeholder:text-iron-text-muted focus:outline-none focus:border-iron-accent/50"
               autoFocus
             />
@@ -71,9 +257,11 @@ export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePi
         {/* Tabs */}
         <div className="flex items-center gap-1 px-4 pb-2">
           {([
-            { id: 'recent', label: 'Recent' },
-            { id: 'notebooks', label: 'Notebooks' },
-          ] as const).map(({ id, label }) => (
+            { id: 'recent', label: 'Recent', count: allItems.length },
+            { id: 'notes', label: 'Notes', count: noteItems.length },
+            { id: 'dictations', label: 'Dictations', count: entryItems.length },
+            { id: 'meetings', label: 'Meetings', count: meetingItems.length },
+          ] as const).map(({ id, label, count }) => (
             <button
               key={id}
               onClick={() => { setActiveTab(id); setQuery(''); }}
@@ -82,8 +270,12 @@ export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePi
                   ? 'bg-iron-accent/15 text-iron-accent-light'
                   : 'text-iron-text-muted hover:bg-iron-surface-hover'
               }`}
+              title={`${count} ${label.toLowerCase()}`}
             >
               {label}
+              {count > 0 && (
+                <span className="ml-1 text-[9px] opacity-60">{count}</span>
+              )}
             </button>
           ))}
           {query && (
@@ -95,53 +287,44 @@ export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePi
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-2 pb-3">
-          {activeTab === 'search' && query && (
-            <NoteList notes={searchResults} notebooks={notebooks} selectedIds={selectedIds} onSelect={onSelect} />
-          )}
-
-          {activeTab === 'recent' && !query && (
+          {query ? (
+            searchResults.length === 0 ? (
+              <EmptyState message={`No matches for "${query}". Try a different keyword.`} />
+            ) : (
+              <ItemList items={searchResults} notebooks={notebooks} selectedIds={selectedIds} onSelect={(it) => onSelect(itemToNote(it))} />
+            )
+          ) : (
             <>
-              {recentNotes.length === 0 ? (
-                <EmptyState message="No notes yet. Create one from the Notes page." />
+              {baseItems.length === 0 ? (
+                <EmptyState message={emptyMessage(activeTab)} />
               ) : (
-                <NoteList notes={recentNotes} notebooks={notebooks} selectedIds={selectedIds} onSelect={onSelect} />
+                <ItemList items={baseItems} notebooks={notebooks} selectedIds={selectedIds} onSelect={(it) => onSelect(itemToNote(it))} />
               )}
-            </>
-          )}
 
-          {activeTab === 'notebooks' && !query && (
-            <div className="space-y-3">
-              {notebooks.length === 0 && (
-                <EmptyState message="No notebooks yet. Create one from the Notes page." />
-              )}
-              {notebooks.map((nb) => {
-                const nbNotes = notebookNotes[nb.id] || [];
-                return (
-                  <div key={nb.id}>
-                    <div className="flex items-center gap-2 px-2 py-1.5">
-                      <div className="w-3 h-3 rounded" style={{ backgroundColor: nb.color }} />
-                      <span className="text-[11px] font-semibold text-iron-text-secondary">{nb.name}</span>
-                      <span className="text-[10px] text-iron-text-muted">{nbNotes.length}</span>
-                    </div>
-                    {nbNotes.length > 0 ? (
-                      <NoteList notes={nbNotes} notebooks={notebooks} selectedIds={selectedIds} onSelect={onSelect} />
-                    ) : (
-                      <p className="text-[11px] text-iron-text-muted px-2 py-1">No notes in this notebook</p>
-                    )}
-                  </div>
-                );
-              })}
-              {/* Uncategorized */}
-              {(notebookNotes['uncategorized'] || []).length > 0 && (
-                <div>
-                  <div className="flex items-center gap-2 px-2 py-1.5">
-                    <StickyNote className="w-3 h-3 text-iron-text-muted" />
-                    <span className="text-[11px] font-semibold text-iron-text-secondary">Uncategorized</span>
-                  </div>
-                  <NoteList notes={notebookNotes['uncategorized']} notebooks={notebooks} selectedIds={selectedIds} onSelect={onSelect} />
+              {/* Notebooks grouping is a Notes-only affordance. We surface it
+                  *under* the flat list on the Notes tab when there are notebooks
+                  defined, instead of behind its own tab — keeps the picker
+                  flatter and avoids a fourth top-level concept. */}
+              {activeTab === 'notes' && notebooks.length > 0 && (
+                <div className="mt-4 pt-3 border-t border-iron-border space-y-3">
+                  <p className="text-[10px] uppercase tracking-wide text-iron-text-muted px-2">Notebooks</p>
+                  {notebooks.map((nb) => {
+                    const inBook = notebookNotes[nb.id] || [];
+                    if (inBook.length === 0) return null;
+                    return (
+                      <div key={nb.id}>
+                        <div className="flex items-center gap-2 px-2 py-1.5">
+                          <div className="w-3 h-3 rounded" style={{ backgroundColor: nb.color }} />
+                          <span className="text-[11px] font-semibold text-iron-text-secondary">{nb.name}</span>
+                          <span className="text-[10px] text-iron-text-muted">{inBook.length}</span>
+                        </div>
+                        <ItemList items={inBook} notebooks={notebooks} selectedIds={selectedIds} onSelect={(it) => onSelect(itemToNote(it))} />
+                      </div>
+                    );
+                  })}
                 </div>
               )}
-            </div>
+            </>
           )}
         </div>
       </div>
@@ -149,18 +332,62 @@ export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePi
   );
 }
 
-function NoteList({ notes, notebooks, selectedIds, onSelect }: {
-  notes: Note[]; notebooks: Notebook[]; selectedIds?: Set<string>; onSelect: (note: Note) => void;
+function emptyMessage(tab: 'recent' | 'notes' | 'dictations' | 'meetings'): string {
+  switch (tab) {
+    case 'notes':
+      return 'No notes yet. Create one from the Notes page to attach it as context.';
+    case 'dictations':
+      return 'No dictations yet. Open the Dictate page and record something to attach it.';
+    case 'meetings':
+      return 'No meetings yet. Start a Granola-mode recording from the Meetings page.';
+    default:
+      return 'Nothing to attach yet. Dictate, take a note, or record a meeting first.';
+  }
+}
+
+function KindBadge({ kind }: { kind: Kind }) {
+  if (kind === 'dictation') {
+    return (
+      <span className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded bg-iron-accent/10 text-iron-accent-light">
+        <Mic className="w-2.5 h-2.5" />
+        Dictation
+      </span>
+    );
+  }
+  if (kind === 'meeting') {
+    return (
+      <span className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400">
+        <Users className="w-2.5 h-2.5" />
+        Meeting
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
+      <StickyNote className="w-2.5 h-2.5" />
+      Note
+    </span>
+  );
+}
+
+function ItemList({ items, notebooks, selectedIds, onSelect }: {
+  items: PickerItem[];
+  notebooks: Notebook[];
+  selectedIds?: Set<string>;
+  onSelect: (item: PickerItem) => void;
 }) {
   return (
     <div className="space-y-0.5">
-      {notes.map((note) => {
-        const isSelected = selectedIds?.has(note.id);
-        const nb = notebooks.find((n) => n.id === note.notebookId);
+      {items.map((it) => {
+        // The selectedIds set holds the *prefixed* synthetic id that AIChat
+        // received, so we recompute the same prefix here to test membership.
+        const synthId = it.kind === 'note' ? it.id : `${it.kind}:${it.id}`;
+        const isSelected = selectedIds?.has(synthId);
+        const nb = it.kind === 'note' && it.notebookId ? notebooks.find((n) => n.id === it.notebookId) : undefined;
         return (
           <button
-            key={note.id}
-            onClick={() => onSelect(note)}
+            key={`${it.kind}:${it.id}`}
+            onClick={() => onSelect(it)}
             className={`w-full text-left px-3 py-2 rounded-lg transition-colors flex items-start gap-2.5 ${
               isSelected
                 ? 'bg-iron-accent/10 border border-iron-accent/20'
@@ -169,19 +396,20 @@ function NoteList({ notes, notebooks, selectedIds, onSelect }: {
           >
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
-                {note.isPinned && <Pin className="w-2.5 h-2.5 text-iron-accent-light flex-shrink-0" />}
-                <span className="text-xs font-medium text-iron-text truncate">{note.title || 'Untitled'}</span>
+                {it.isPinned && <Pin className="w-2.5 h-2.5 text-iron-accent-light flex-shrink-0" />}
+                <span className="text-xs font-medium text-iron-text truncate">{it.title || 'Untitled'}</span>
               </div>
               <p className="text-[11px] text-iron-text-muted truncate mt-0.5">
-                {note.content.slice(0, 60).replace(/\n/g, ' ') || 'Empty note'}
+                {it.preview || 'No content'}
               </p>
-              <div className="flex items-center gap-2 mt-1">
+              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                <KindBadge kind={it.kind} />
                 {nb && (
                   <span className="text-[10px] px-1.5 rounded" style={{ color: nb.color, backgroundColor: nb.color + '15' }}>
                     {nb.name}
                   </span>
                 )}
-                {note.tags.slice(0, 3).map((t) => (
+                {(it.tags ?? []).slice(0, 3).map((t) => (
                   <span key={t} className="text-[10px] text-iron-text-muted">#{t}</span>
                 ))}
               </div>
