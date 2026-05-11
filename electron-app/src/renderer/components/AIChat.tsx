@@ -332,7 +332,19 @@ export function AIChat() {
           filters: {},
           skip_archived: true,
         };
-        const json = await (window as any).ironmic.ragRetrieveHybrid?.(text, new Uint8Array(), JSON.stringify(opts));
+        // Hard 12-second timeout. The retrieval call CAN take a while
+        // when the IndexerService is mid-meeting-chunk (Rust addon
+        // serializes SQL through one mutex). The Rust side will still
+        // finish eventually, but blocking the user-visible send for
+        // longer than that is unacceptable. We fall back to sending
+        // without retrieved context — the assistant just answers from
+        // its general knowledge for this turn. Next turn will likely
+        // succeed once the indexer releases the mutex.
+        const retrievalPromise: Promise<string | null> = (window as any).ironmic.ragRetrieveHybrid
+          ? (window as any).ironmic.ragRetrieveHybrid(text, new Uint8Array(), JSON.stringify(opts))
+          : Promise.resolve(null);
+        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 12_000));
+        const json = await Promise.race([retrievalPromise, timeoutPromise]);
         if (json) {
           const parsed = JSON.parse(json);
           const hits: Array<{ label: string; text: string }> = parsed?.hits ?? [];
@@ -342,6 +354,8 @@ export function AIChat() {
               .join('\n\n');
             contextBlocks.push(`[Retrieved from your IronMic — ${hits.length} sources]\n${block}`);
           }
+        } else {
+          console.warn('[AIChat] retrieval timed out or returned empty — sending without retrieved context.');
         }
       } catch (err) {
         // Retrieval failure should never block the send. Log and continue

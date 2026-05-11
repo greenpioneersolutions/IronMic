@@ -24,8 +24,16 @@
  */
 
 type SourceType = 'entry' | 'meeting' | 'user_note';
-const BATCH_SIZE = 25;
-const SOURCE_TYPES: SourceType[] = ['entry', 'meeting', 'user_note'];
+// Small batch + generous yield to keep the SQLite mutex available for the
+// user-facing retrieval path. Earlier values (25 / 50ms) starved the
+// "Searching your knowledge…" call when the indexer was mid-meeting-chunk
+// on a corpus with hundreds of dictations or long transcripts. Five at a
+// time + 200ms yield drops the median latency cost for an interleaved
+// retrieval call from "seconds" to "tens of milliseconds" with negligible
+// effect on total backfill time (which runs once, on first AI Chat visit).
+const BATCH_SIZE = 5;
+const BATCH_YIELD_MS = 200;
+const SOURCE_TYPES: SourceType[] = ['user_note', 'entry', 'meeting'];
 
 export interface IndexerStatus {
   /** True while a backfill loop is running. */
@@ -77,10 +85,16 @@ class IndexerServiceImpl {
     };
     this.notify();
 
-    // Run each source type in parallel — chunking one type doesn't block
-    // the others, and the Rust addon serializes its SQLite writes under
-    // the database mutex anyway.
-    await Promise.all(SOURCE_TYPES.map((st) => this.drainSourceType(st)));
+    // Sequential rather than parallel. The Rust addon serializes every
+    // SQL call through one mutex, so running all three source types
+    // concurrently from JS would just stack three chunkers in front of
+    // the user's search query in the lock queue. Sequential lets us
+    // finish small/fast types (user_notes, then entries) before chewing
+    // through meetings — so a Search query landing mid-backfill has
+    // *some* content to work with even on the very first AI Chat visit.
+    for (const st of SOURCE_TYPES) {
+      await this.drainSourceType(st);
+    }
 
     this.running = false;
     this.status = { ...this.status, running: false };
@@ -116,9 +130,14 @@ class IndexerServiceImpl {
         },
       };
       this.notify();
-      // Yield to the UI thread between batches. Tiny, but prevents a long
-      // initial backfill from monopolizing the JS event loop.
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Yield generously between batches. The yield isn't really for the
+      // JS event loop — the addon call is sync from JS's POV anyway —
+      // it's to give competing N-API calls (notably ragRetrieveHybrid
+      // when the user has Search mode on) a window to grab the SQLite
+      // mutex between our chunking transactions. Without this delay the
+      // indexer can effectively starve the search call for the duration
+      // of the backfill.
+      await new Promise((resolve) => setTimeout(resolve, BATCH_YIELD_MS));
     }
   }
 
