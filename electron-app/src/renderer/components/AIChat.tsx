@@ -970,18 +970,25 @@ export function AIChat() {
         onNewChat={handleNewChat}
       />
 
-      {/* Note picker modal */}
+      {/* Note picker modal — stays open after each pick so the user can
+          keep adding sources in one motion. Closing is explicit (X button,
+          ESC, or backdrop click). Selected items render as pills inside
+          the modal too, so detaching can happen without dismissing. */}
       <NotePickerModal
         open={showNotePicker}
         onClose={() => setShowNotePicker(false)}
         onSelect={(note) => {
           setAttachedNotes((prev) => {
+            // Idempotent: re-picking an already-attached item is a no-op,
+            // not a duplicate. The pill row visibly reflects that nothing
+            // changed, and the row's row-level Check on that list item
+            // stays lit.
             if (prev.find((n) => n.id === note.id)) return prev;
             return [...prev, note];
           });
-          setShowNotePicker(false);
         }}
-        selectedIds={new Set(attachedNotes.map((n) => n.id))}
+        selectedNotes={attachedNotes}
+        onDeselect={(id) => setAttachedNotes((prev) => prev.filter((n) => n.id !== id))}
       />
     </div>
   );

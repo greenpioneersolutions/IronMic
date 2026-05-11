@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Search, StickyNote, BookOpen, Pin, Check, Mic, Users } from 'lucide-react';
+import { Search, StickyNote, BookOpen, Pin, Check, Mic, Users, X } from 'lucide-react';
 import { useNotesStore, type Note, type Notebook } from '../stores/useNotesStore';
 import { useEntryStore } from '../stores/useEntryStore';
 import { useMeetingStore } from '../stores/useMeetingStore';
@@ -15,7 +15,12 @@ interface NotePickerModalProps {
    *  (`[Note: <title>]\n<content>`) is just as legible whether the body came
    *  from a manual note, a Whisper transcript, or a meeting summary. */
   onSelect: (note: Note) => void;
-  selectedIds?: Set<string>;
+  /** Currently-attached items, rendered as a pill row at the top of the modal
+   *  so the user has a single in-modal view of "what's already in context"
+   *  and can click × on any pill to detach without dismissing the picker. */
+  selectedNotes?: Note[];
+  /** Called when the user clicks the × on an in-modal pill. */
+  onDeselect?: (id: string) => void;
 }
 
 /** Source type for an attachable item. Used internally by the picker to
@@ -162,10 +167,19 @@ function itemToNote(item: PickerItem): Note {
   };
 }
 
-export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePickerModalProps) {
+export function NotePickerModal({ open, onClose, onSelect, selectedNotes, onDeselect }: NotePickerModalProps) {
   const [query, setQuery] = useState('');
   type Tab = 'recent' | 'notes' | 'dictations' | 'meetings';
   const [activeTab, setActiveTab] = useState<Tab>('recent');
+
+  // Derived set of selected ids for the inline check-mark indicator on each
+  // list row. Mirrors the prefixed-id convention the picker itself emits
+  // (`dictation:<id>` / `meeting:<id>` / plain for notes), so a re-attach
+  // attempt registers as already-selected even after a navigation away.
+  const selectedIds = useMemo(
+    () => new Set((selectedNotes ?? []).map((n) => n.id)),
+    [selectedNotes],
+  );
 
   const notes = useNotesStore((s) => s.notes);
   const notebooks = useNotesStore((s) => s.notebooks);
@@ -227,7 +241,59 @@ export function NotePickerModal({ open, onClose, onSelect, selectedIds }: NotePi
 
   return (
     <Modal open onClose={onClose} title="Add Context">
-      <div className="w-[480px] max-h-[60vh] flex flex-col">
+      <div className="w-[480px] max-w-full max-h-[60vh] flex flex-col overflow-hidden">
+        {/* Already-attached pill row — mirror of the row in AIChat, kept in
+            the modal so the user can detach without dismissing. Renders only
+            when at least one item is attached. */}
+        {selectedNotes && selectedNotes.length > 0 && (
+          <div className="px-4 pt-3 pb-1">
+            <div className="flex items-center gap-1.5 flex-wrap rounded-lg bg-iron-bg/40 border border-iron-border px-2 py-1.5">
+              <span className="text-[10px] uppercase tracking-wide text-iron-text-muted">
+                Attached · {selectedNotes.length}
+              </span>
+              {selectedNotes.map((n) => {
+                const kind: Kind = n.id.startsWith('dictation:')
+                  ? 'dictation'
+                  : n.id.startsWith('meeting:')
+                    ? 'meeting'
+                    : 'note';
+                const palette =
+                  kind === 'dictation' ? 'bg-iron-accent/15 text-iron-accent-light border-iron-accent/25'
+                  : kind === 'meeting'  ? 'bg-amber-500/15 text-amber-400 border-amber-500/25'
+                  : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25';
+                const Icon = kind === 'dictation' ? Mic : kind === 'meeting' ? Users : StickyNote;
+                return (
+                  <span
+                    key={n.id}
+                    className={`group inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border max-w-[180px] ${palette}`}
+                    title={n.title || 'Untitled'}
+                  >
+                    <Icon className="w-3 h-3 flex-shrink-0" />
+                    <span className="truncate">{n.title || 'Untitled'}</span>
+                    {onDeselect && (
+                      <button
+                        onClick={() => onDeselect(n.id)}
+                        className="ml-0.5 opacity-60 hover:opacity-100 hover:text-iron-danger flex-shrink-0"
+                        aria-label={`Detach ${n.title || 'item'}`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </span>
+                );
+              })}
+              {selectedNotes.length > 1 && onDeselect && (
+                <button
+                  onClick={() => selectedNotes.forEach((n) => onDeselect(n.id))}
+                  className="ml-auto text-[10px] text-iron-text-muted hover:text-iron-danger underline-offset-2 hover:underline"
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Search */}
         <div className="px-4 pt-3 pb-2">
           <div className="relative">
@@ -337,7 +403,7 @@ function ItemList({ items, notebooks, selectedIds, onSelect }: {
   onSelect: (item: PickerItem) => void;
 }) {
   return (
-    <div className="space-y-0.5">
+    <div className="space-y-0.5 w-full">
       {items.map((it) => {
         // The selectedIds set holds the *prefixed* synthetic id that AIChat
         // received, so we recompute the same prefix here to test membership.
@@ -348,29 +414,38 @@ function ItemList({ items, notebooks, selectedIds, onSelect }: {
           <button
             key={`${it.kind}:${it.id}`}
             onClick={() => onSelect(it)}
-            className={`w-full text-left px-3 py-2 rounded-lg transition-colors flex items-start gap-2.5 ${
+            // The full chain — `w-full max-w-full overflow-hidden` on the
+            // button, `min-w-0 flex-1 overflow-hidden` on the content
+            // wrapper — is needed because flex children default to
+            // `min-width: auto`, which lets long single-line text expand
+            // the cell past its parent. Without all three, a dictation
+            // preview that starts with a wide markdown header (`#`-padded)
+            // will push the rest of the card off the modal's right edge.
+            className={`w-full max-w-full overflow-hidden text-left px-3 py-2 rounded-lg transition-colors flex items-start gap-2.5 ${
               isSelected
                 ? 'bg-iron-accent/10 border border-iron-accent/20'
                 : 'hover:bg-iron-surface-hover border border-transparent'
             }`}
           >
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-1.5">
+            <div className="flex-1 min-w-0 overflow-hidden">
+              <div className="flex items-center gap-1.5 min-w-0">
                 {it.isPinned && <Pin className="w-2.5 h-2.5 text-iron-accent-light flex-shrink-0" />}
-                <span className="text-xs font-medium text-iron-text truncate">{it.title || 'Untitled'}</span>
+                <span className="text-xs font-medium text-iron-text truncate min-w-0 flex-1">{it.title || 'Untitled'}</span>
               </div>
-              <p className="text-[11px] text-iron-text-muted truncate mt-0.5">
+              <p
+                className="text-[11px] text-iron-text-muted mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap"
+              >
                 {it.preview || 'No content'}
               </p>
-              <div className="flex items-center gap-2 mt-1 flex-wrap">
+              <div className="flex items-center gap-2 mt-1 flex-wrap min-w-0">
                 <KindBadge kind={it.kind} />
                 {nb && (
-                  <span className="text-[10px] px-1.5 rounded" style={{ color: nb.color, backgroundColor: nb.color + '15' }}>
+                  <span className="text-[10px] px-1.5 rounded truncate max-w-[120px]" style={{ color: nb.color, backgroundColor: nb.color + '15' }}>
                     {nb.name}
                   </span>
                 )}
                 {(it.tags ?? []).slice(0, 3).map((t) => (
-                  <span key={t} className="text-[10px] text-iron-text-muted">#{t}</span>
+                  <span key={t} className="text-[10px] text-iron-text-muted truncate max-w-[100px]">#{t}</span>
                 ))}
               </div>
             </div>
