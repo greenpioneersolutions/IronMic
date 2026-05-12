@@ -245,6 +245,37 @@ function selectPolishPrompt(target: 'local' | 'cloud'): string {
   return target === 'cloud' ? CLOUD_POLISH_PROMPT : LOCAL_POLISH_PROMPT;
 }
 
+/**
+ * Compose the single-string prompt sent to a cloud CLI for polish.
+ *
+ * Claude follows the existing `${systemPrompt}\n\nInput transcript:\n${rawText}`
+ * shape — it's tuned for Claude's instruction-following.
+ *
+ * Copilot, an interactive coding assistant, can mis-read that shape as pasted
+ * user content and respond conversationally ("you can give me text now") as if
+ * no input was attached. Use standard markdown role markers Copilot is trained
+ * to honor, with an explicit OUTPUT cue so it produces the cleaned text rather
+ * than a meta-reply.
+ */
+function buildPolishPromptFor(
+  provider: 'claude' | 'copilot',
+  systemPrompt: string,
+  rawText: string,
+): string {
+  if (provider === 'claude') {
+    return `${systemPrompt}\n\nInput transcript:\n${rawText}`;
+  }
+  return [
+    '### INSTRUCTIONS',
+    systemPrompt,
+    '',
+    '### INPUT (the text to clean)',
+    rawText,
+    '',
+    '### OUTPUT (cleaned text only — no preamble, no explanation)',
+  ].join('\n');
+}
+
 export class AIManager {
   private copilot = new CopilotAdapter();
   private claude = new ClaudeAdapter();
@@ -706,12 +737,22 @@ export class AIManager {
         ? this.buildCliReplayPrompt(priorMessages, prompt)
         : prompt;
     const resolvedModel = this.resolveModel(provider, model);
-    const args = provider === 'copilot'
-      ? this.copilot.buildArgsForBinary(binary, effectivePrompt, continueSession, resolvedModel ?? model)
-      : adapter.buildArgs(effectivePrompt, continueSession, resolvedModel ?? model);
+    let inv;
+    try {
+      inv = await adapter.buildInvocation(binary, effectivePrompt, continueSession, resolvedModel ?? model);
+    } catch (err) {
+      // buildInvocation throws when the prompt is too large for argv and the
+      // CLI's stdin transport was probed and failed. Surface as a clean
+      // rejection so the renderer can show the actionable upgrade hint.
+      throw err instanceof Error ? err : new Error(String(err));
+    }
 
     if (process.env.NODE_ENV === 'development') {
-      console.log(`[ai] Sending to ${provider}: ${binary} [${args.length} args, prompt_length=${prompt.length}]`);
+      console.log(
+        `[ai] Sending to ${provider}: ${binary} ` +
+          `[${inv.args.length} args, prompt_length=${prompt.length}, ` +
+          `transport=${inv.transport}${inv.backendLabel ? `, backend=${inv.backendLabel}` : ''}]`,
+      );
     }
 
     return new Promise((resolve, reject) => {
@@ -727,15 +768,29 @@ export class AIManager {
       // spawnPortable wraps Windows .cmd shims via cmd.exe /c. We never use
       // shell:true because that would require escaping user prompts against
       // cmd.exe metacharacter injection.
-      const proc = spawnPortable(binary, args, {
+      const proc = spawnPortable(binary, inv.args, {
         env: scopedEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });
 
-      // Close stdin immediately. gh-models otherwise waits on EOF before
-      // streaming the response when run with a positional prompt arg.
-      try { proc.stdin?.end(); } catch { /* ignore */ }
+      // Attach the stdin error handler BEFORE writing — otherwise an EPIPE
+      // from a child that exited early is uncaught and crashes the process.
+      proc.stdin?.on('error', (err) => {
+        if (process.env.NODE_ENV === 'development') {
+          console.error(`[ai] ${provider} stdin error:`, err);
+        }
+        // Don't reject here — the close handler reports the exit code.
+      });
+
+      if (inv.stdin !== undefined) {
+        // Single write+end avoids backpressure plumbing for prompt-sized payloads.
+        try { proc.stdin?.end(inv.stdin, 'utf-8'); } catch { /* ignore */ }
+      } else {
+        // Close stdin immediately. gh-models otherwise waits on EOF before
+        // streaming the response when run with a positional prompt arg.
+        try { proc.stdin?.end(); } catch { /* ignore */ }
+      }
 
       this.activeProcess = proc;
       this.activeProcessSessionId = sessionId ?? null;
@@ -831,17 +886,29 @@ export class AIManager {
     // The system prompt depends on polish_format_mode and the path: cloud
     // gets the richer prompt with worked examples; local gets the terse
     // variant; plain mode falls back to the legacy CLEANUP_PROMPT.
-    const cloudPrompt = `${selectPolishPrompt('cloud')}\n\nInput transcript:\n${rawText}`;
+    //
+    // The Copilot path uses a different framing (markdown role markers) since
+    // it mis-reads the Claude-style "Input transcript:" lead-in as pasted
+    // user text and replies "give me the text" — see buildPolishPromptFor.
+    const cloudSystemPrompt = selectPolishPrompt('cloud');
     const claude = opts.allowCloud ? await this.checkAuth('claude') : null;
     if (claude?.authenticated) {
       const claudeModel = savedProvider === 'claude' ? savedModelId : null;
-      const text = await this.runCliOneShot('claude', cloudPrompt, claudeModel || undefined);
+      const text = await this.runCliOneShot(
+        'claude',
+        buildPolishPromptFor('claude', cloudSystemPrompt, rawText),
+        claudeModel || undefined,
+      );
       return { text, providerUsed: 'claude' };
     }
     const copilot = opts.allowCloud ? await this.checkAuth('copilot') : null;
     if (copilot?.authenticated) {
       const copilotModel = savedProvider === 'copilot' ? savedModelId : null;
-      const text = await this.runCliOneShot('copilot', cloudPrompt, copilotModel || undefined);
+      const text = await this.runCliOneShot(
+        'copilot',
+        buildPolishPromptFor('copilot', cloudSystemPrompt, rawText),
+        copilotModel || undefined,
+      );
       return { text, providerUsed: 'copilot' };
     }
     const resolvedLocal = resolveActiveChatModel(native);
@@ -971,6 +1038,10 @@ export class AIManager {
    * separately. The CLI binaries take a single prompt argument with no
    * separate system-message channel, so we concatenate inline — same
    * approach as the polish path, but without baking in the cleanup prompt.
+   *
+   * Copilot gets the structured markdown framing it actually honors; Claude
+   * keeps the unchanged double-newline concatenation that the existing prompts
+   * are written against.
    */
   private async runCliOneShotWithSystem(
     provider: 'claude' | 'copilot',
@@ -978,11 +1049,19 @@ export class AIManager {
     userPrompt: string,
     model?: string,
   ): Promise<string> {
-    return this.runCliOneShot(
-      provider,
-      `${systemPrompt}\n\n${userPrompt}`,
-      model,
-    );
+    const combined =
+      provider === 'claude'
+        ? `${systemPrompt}\n\n${userPrompt}`
+        : [
+            '### INSTRUCTIONS',
+            systemPrompt,
+            '',
+            '### REQUEST',
+            userPrompt,
+            '',
+            '### RESPONSE (answer the request above using only the instructions; no preamble)',
+          ].join('\n');
+    return this.runCliOneShot(provider, combined, model);
   }
 
   /**
@@ -1005,17 +1084,32 @@ export class AIManager {
     }
     const binary = auth.binaryPath!;
     const resolvedModel = this.resolveModel(provider, model);
-    const args = provider === 'copilot'
-      ? this.copilot.buildArgsForBinary(binary, prompt, false, resolvedModel ?? model)
-      : adapter.buildArgs(prompt, false, resolvedModel ?? model);
+    const inv = await adapter.buildInvocation(binary, prompt, false, resolvedModel ?? model);
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log(
+        `[ai] One-shot ${provider}: ${binary} ` +
+          `[${inv.args.length} args, prompt_length=${prompt.length}, ` +
+          `transport=${inv.transport}${inv.backendLabel ? `, backend=${inv.backendLabel}` : ''}]`,
+      );
+    }
 
     return new Promise<string>((resolve, reject) => {
-      const proc = spawnPortable(binary, args, {
+      const proc = spawnPortable(binary, inv.args, {
         env: getScopedSpawnEnv(provider),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });
-      try { proc.stdin?.end(); } catch { /* ignore */ }
+      proc.stdin?.on('error', (err) => {
+        if (process.env.NODE_ENV === 'development') {
+          console.error(`[ai] ${provider} stdin error (one-shot):`, err);
+        }
+      });
+      if (inv.stdin !== undefined) {
+        try { proc.stdin?.end(inv.stdin, 'utf-8'); } catch { /* ignore */ }
+      } else {
+        try { proc.stdin?.end(); } catch { /* ignore */ }
+      }
 
       let fullOutput = '';
       let stderrBuf = '';

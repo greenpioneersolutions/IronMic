@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { basename, join } from 'path';
-import type { ICLIAdapter, AIProvider, AIModel, ParsedOutput } from './types';
+import type { ICLIAdapter, AIProvider, AIModel, ParsedOutput, CliInvocation } from './types';
 import { getScopedSpawnEnv, getSpawnEnv, resolveInShell } from '../utils/shell-env';
-import { execFilePortable } from '../utils/spawn-portable';
+import { execFilePortable, execFilePortableWithStdin } from '../utils/spawn-portable';
 import { logCopilotProbe } from '../utils/copilot-probe-log';
 import {
   getCuratedCopilotModels,
@@ -31,7 +31,37 @@ interface CachedCatalog {
 
 const ANSI_RE = /\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])/g;
 const PROBE_TIMEOUT_MS = 5000;
+const STDIN_PROBE_TIMEOUT_MS = 12_000;
 const CACHE_TTL_MS = 10 * 60 * 1000;
+/**
+ * Argv eligibility ceiling. Below this size, normal native-spawn argv passes
+ * cleanly on macOS/Linux and on Windows .exe. Larger prompts route through
+ * stdin regardless of platform (also avoids `--prompt` semantic limits the
+ * Copilot CLI may impose internally).
+ */
+const ARGV_SIZE_LIMIT = 4096;
+
+/**
+ * Decide whether a prompt is safe to pass on argv for the given binary.
+ *
+ * Platform-aware:
+ * - Size ceiling applies everywhere — the public Copilot CLI doesn't document
+ *   safe `--prompt` lengths; we cap at 4 KB.
+ * - cmd.exe metacharacter rejection only fires when `resolvePortableSpawn`
+ *   would wrap the binary through `cmd.exe /c`. On macOS/Linux and on
+ *   Windows-with-`.exe`, `spawn(binary, args, { shell: false })` does NOT
+ *   shell-parse argv, so `& | < > ^ "` are safe there.
+ *
+ * Keep in sync with `resolvePortableSpawn` in spawn-portable.ts.
+ */
+function argvEligible(binaryPath: string, prompt: string): boolean {
+  if (prompt.length > ARGV_SIZE_LIMIT) return false;
+  const wrapsViaCmd =
+    process.platform === 'win32' &&
+    (/\.cmd$/i.test(binaryPath) || !/\.[a-z]+$/i.test(binaryPath));
+  if (wrapsViaCmd && /[\n\r&|<>^"]/.test(prompt)) return false;
+  return true;
+}
 
 const VENDOR_PREFIXES = [
   'gpt-',
@@ -61,6 +91,13 @@ const VENDOR_PREFIXES = [
 export class CopilotAdapter implements ICLIAdapter {
   name: AIProvider = 'copilot';
   private cachedCatalog: CachedCatalog | null = null;
+  /**
+   * Result of `probeStdinSupport`, keyed by `${backend}:${binaryPath}`. A user
+   * can update Copilot or switch between `copilot.cmd` / `copilot.exe` / `gh`
+   * during a single session — caching by backend alone would preserve a stale
+   * `false`. Cleared by `clearModelCache()`.
+   */
+  private stdinCapability: Map<string, boolean> = new Map();
 
   async isInstalled(): Promise<boolean> {
     return (await this.resolveBackend(false)) !== null;
@@ -173,6 +210,7 @@ export class CopilotAdapter implements ICLIAdapter {
 
   clearModelCache(): void {
     this.cachedCatalog = null;
+    this.stdinCapability.clear();
   }
 
   /** Build args against a generic gh-models invocation (used outside a resolved backend). */
@@ -197,6 +235,139 @@ export class CopilotAdapter implements ICLIAdapter {
     }
     // gh models run is genuinely stateless — no continuation flag exists.
     return this.buildArgs(prompt, false, model);
+  }
+
+  /**
+   * Pick an invocation shape (argv vs stdin) for the given prompt and binary.
+   *
+   * Small / metacharacter-safe prompts keep the existing argv path so we don't
+   * regress users on the documented happy path. Large or metacharacter-laden
+   * prompts route through stdin — *if* an execution probe shows the resolved
+   * Copilot backend actually accepts stdin. If the probe fails, we throw with
+   * an actionable error so the user sees a clear failure instead of a silent
+   * "Copilot has no context" reply.
+   *
+   * - `copilot --prompt` is documented; stdin-only mode is NOT documented, so
+   *   the probe is essential (some builds open interactive mode and ignore
+   *   piped stdin).
+   * - `gh models run` documents the pipe form `cat file | gh models run <id>
+   *   "prompt"`. For stdin transport we keep a short positional directive so
+   *   the CLI doesn't drop into REPL, with the heavy payload on stdin.
+   */
+  async buildInvocation(
+    binaryPath: string,
+    prompt: string,
+    continueSession: boolean,
+    model?: AIModel | string,
+  ): Promise<CliInvocation> {
+    const isCopilotCli = this.looksLikeCopilotBinary(binaryPath);
+    const backend: CopilotBackend = isCopilotCli ? 'copilot-cli' : 'gh-models';
+    const backendLabel = backend;
+
+    if (argvEligible(binaryPath, prompt)) {
+      return {
+        args: this.buildArgsForBinary(binaryPath, prompt, continueSession, model),
+        transport: 'argv',
+        backendLabel,
+      };
+    }
+
+    const stdinOk = await this.probeStdinSupport(binaryPath, backend, model);
+    if (!stdinOk) {
+      throw new Error(
+        backend === 'copilot-cli'
+          ? "Copilot CLI on this machine doesn't accept large prompts via stdin (probed). " +
+            'Upgrade with: npm i -g @github/copilot, switch the IronMic AI provider to ' +
+            'Claude or Local, or shorten the input.'
+          : "GitHub Models CLI on this machine doesn't accept large prompts via stdin (probed). " +
+            'Upgrade `gh` and the models extension (gh extension upgrade gh-models), switch the ' +
+            'IronMic AI provider to Claude or Local, or shorten the input.',
+      );
+    }
+
+    if (isCopilotCli) {
+      // -s + --continue + --model only — prompt comes from stdin. The
+      // capability probe has already confirmed this build reads stdin.
+      const args: string[] = ['-s'];
+      if (continueSession) args.push('--continue');
+      const runId = this.runIdForCopilotCli(model);
+      if (runId) args.push('--model', runId);
+      return { args, stdin: prompt, transport: 'stdin', backendLabel };
+    }
+
+    // gh models run with stdin: keep a short positional directive so the CLI
+    // does NOT enter REPL mode. The model treats stdin as the primary content.
+    const modelId = this.runIdForGhModels(model);
+    return {
+      args: [
+        'models',
+        'run',
+        modelId,
+        'Follow the complete IronMic request provided on stdin.',
+      ],
+      stdin: prompt,
+      transport: 'stdin',
+      backendLabel,
+    };
+  }
+
+  /**
+   * Execution probe: spawn the CLI with a tiny known prompt on stdin and check
+   * whether stdout contains the expected token. Cached per `(backend, binaryPath)`
+   * so users who never trigger a large prompt never pay this cost.
+   */
+  private async probeStdinSupport(
+    binaryPath: string,
+    backend: CopilotBackend,
+    model?: AIModel | string,
+  ): Promise<boolean> {
+    const key = `${backend}:${binaryPath}`;
+    const cached = this.stdinCapability.get(key);
+    if (cached !== undefined) return cached;
+
+    // For gh-models, probe with the model the user is actually entitled to.
+    // Hardcoding openai/gpt-4o-mini risks a false negative if the user's
+    // catalog/entitlement doesn't include it. Falls back when no model known.
+    const ghModelId = this.runIdForGhModels(model) || 'openai/gpt-4o-mini';
+    const probeArgs =
+      backend === 'copilot-cli'
+        ? ['-s']
+        : ['models', 'run', ghModelId, 'Reply with the word OK.'];
+    const probeInput =
+      backend === 'copilot-cli'
+        ? 'Reply with exactly the word OK and nothing else.'
+        : '(no extra content)';
+
+    try {
+      const { stdout, stderr } = await execFilePortableWithStdin(
+        binaryPath,
+        probeArgs,
+        probeInput,
+        {
+          timeout: STDIN_PROBE_TIMEOUT_MS,
+          env: getScopedSpawnEnv('copilot'),
+        },
+      );
+      const ok = /\bOK\b/i.test(stdout);
+      this.stdinCapability.set(key, ok);
+      void logCopilotProbe({
+        args: [basename(binaryPath), ...probeArgs, '<stdin>'],
+        exitCode: 0,
+        stdout,
+        stderr,
+      });
+      return ok;
+    } catch (err) {
+      const e = err as { stdout?: unknown; stderr?: unknown; code?: number | string };
+      this.stdinCapability.set(key, false);
+      void logCopilotProbe({
+        args: [basename(binaryPath), ...probeArgs, '<stdin>'],
+        exitCode: e?.code ?? null,
+        stdout: coerce(e?.stdout),
+        stderr: coerce(e?.stderr),
+      });
+      return false;
+    }
   }
 
   parseOutput(data: string): ParsedOutput {

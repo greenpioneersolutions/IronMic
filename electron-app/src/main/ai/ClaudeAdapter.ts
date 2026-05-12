@@ -1,6 +1,22 @@
 import { execFileSync } from 'child_process';
-import type { ICLIAdapter, ParsedOutput, AIProvider, AIModel } from './types';
+import type { ICLIAdapter, ParsedOutput, AIProvider, AIModel, CliInvocation } from './types';
 import { getSpawnEnv, resolveInShell } from '../utils/shell-env';
+
+/**
+ * Argv-eligibility ceiling for Claude. Same rationale as Copilot: keeps the
+ * spawn within Windows cmd.exe's 8191-char limit (for .cmd shims) and avoids
+ * argv-quoting fragility for multiline / metacharacter content.
+ */
+const CLAUDE_ARGV_SIZE_LIMIT = 4096;
+
+function claudeArgvEligible(binaryPath: string, prompt: string): boolean {
+  if (prompt.length > CLAUDE_ARGV_SIZE_LIMIT) return false;
+  const wrapsViaCmd =
+    process.platform === 'win32' &&
+    (/\.cmd$/i.test(binaryPath) || !/\.[a-z]+$/i.test(binaryPath));
+  if (wrapsViaCmd && /[\n\r&|<>^"]/.test(prompt)) return false;
+  return true;
+}
 
 export class ClaudeAdapter implements ICLIAdapter {
   name: AIProvider = 'claude';
@@ -94,6 +110,39 @@ export class ClaudeAdapter implements ICLIAdapter {
     if (continueSession) args.push('--continue');
     args.push('--print', prompt);
     return args;
+  }
+
+  /**
+   * Claude CLI accepts the prompt either positionally after `--print` or via
+   * stdin when `--print` is the final flag. Preserve the documented option
+   * ordering (`--model id --continue --print [prompt]`) so the parser never
+   * sees a prompt argument before its option flags.
+   */
+  async buildInvocation(
+    binaryPath: string,
+    prompt: string,
+    continueSession: boolean,
+    model?: AIModel | string,
+  ): Promise<CliInvocation> {
+    const modelId = typeof model === 'object' ? model.id : model;
+    const baseArgs: string[] = [];
+    if (modelId) baseArgs.push('--model', modelId);
+    if (continueSession) baseArgs.push('--continue');
+    baseArgs.push('--print');
+
+    if (claudeArgvEligible(binaryPath, prompt)) {
+      return {
+        args: [...baseArgs, prompt],
+        transport: 'argv',
+        backendLabel: 'claude',
+      };
+    }
+    return {
+      args: baseArgs,
+      stdin: prompt,
+      transport: 'stdin',
+      backendLabel: 'claude',
+    };
   }
 
   async listAvailableModels(): Promise<AIModel[]> {

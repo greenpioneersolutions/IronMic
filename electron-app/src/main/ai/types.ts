@@ -47,9 +47,48 @@ export interface IAIAdapter {
   clearModelCache?(): void;
 }
 
+export type CliTransport = 'argv' | 'stdin';
+
+/**
+ * How an adapter wants its subprocess invoked for a given prompt.
+ *
+ * `transport: 'argv'` — prompt is embedded in `args`; stdin is closed immediately
+ * after spawn (existing behavior, fine for small/safe prompts).
+ *
+ * `transport: 'stdin'` — prompt is NOT in `args`; AIManager writes `stdin` to the
+ * child stdin then closes it. This is the safe path for large or
+ * metacharacter-containing prompts that would otherwise hit Windows cmd.exe's
+ * 8191-char limit or argv-quoting fragility.
+ */
+export interface CliInvocation {
+  /** argv to pass to spawn. For stdin transport, prompt is NOT in args. */
+  args: string[];
+  /** When set, piped to child stdin then stdin closed. */
+  stdin?: string;
+  /** Transport the adapter chose. Carried through so AIManager can log without re-inferring. */
+  transport: CliTransport;
+  /**
+   * Free-form backend label for logging only (e.g. 'copilot-cli', 'gh-models',
+   * 'claude'). Provider-neutral — this generic interface must not import
+   * Copilot-specific enums.
+   */
+  backendLabel?: string;
+}
+
 /** Extended adapter interface for CLI-based providers (Claude, Copilot). */
 export interface ICLIAdapter extends IAIAdapter {
   buildArgs(prompt: string, continueSession: boolean, model?: AIModel | string): string[];
+  /**
+   * Choose an invocation shape (argv vs stdin) for the given prompt. Async
+   * because some adapters lazily probe the CLI's capabilities before deciding.
+   * AIManager calls this in place of `buildArgs` for all production spawn paths.
+   */
+  buildInvocation(
+    binaryPath: string,
+    prompt: string,
+    continueSession: boolean,
+    model?: AIModel | string,
+  ): Promise<CliInvocation>;
   parseOutput(data: string): ParsedOutput;
 }
 

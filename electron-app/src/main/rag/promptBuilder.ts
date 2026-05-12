@@ -106,10 +106,14 @@ export interface ClaudePromptShape {
   userPrompt: string;
 }
 
-/** Copilot / gh-models / any-CLI-without-system route: a single user
- *  prompt with the system block prepended via the delimiter. */
+/** Copilot / Claude-without-`--append-system-prompt` / any-CLI-without-system
+ *  route: a single user prompt with the system block prepended. The exact
+ *  framing differs by provider — Copilot gets standard markdown role markers
+ *  (`### INSTRUCTIONS`, `### CONTEXT`, `### QUESTION`) since the
+ *  `<<IRONMIC SYSTEM>>` delimiter is tuned for Claude's instruction-following.
+ */
 export interface PrependPromptShape {
-  route: 'copilot';
+  route: 'claude' | 'copilot';
   userPrompt: string;
 }
 
@@ -167,12 +171,44 @@ export function buildPrompt(
     };
   }
 
-  // Fallback / Copilot / Claude without --append-system-prompt support: prepend.
+  // Copilot route: use standard markdown role markers. The `<<IRONMIC SYSTEM>>`
+  // delimiter is tuned for Claude's instruction-following and Copilot, which is
+  // an interactive coding assistant, can mis-read it as user-pasted text and
+  // respond "give me the text now" as if no context was attached.
+  if (opts.route === 'copilot') {
+    const userPrompt = buildCopilotPrompt(systemText, ctx, userQuestion);
+    return { route: 'copilot', userPrompt };
+  }
+
+  // Claude without `--append-system-prompt` support: keep the existing
+  // delimiter shape that's tuned for Claude's instruction-following.
   const userPrompt = `${PREPEND_START}\n${systemText}\n${PREPEND_END}\n\nUser question:\n${contextBody}`;
-  return { route: opts.route === 'claude' ? 'claude' as any : 'copilot', userPrompt } as any;
-  // The cast is for the narrow Claude-fallback case: the runtime shape is
-  // `{ userPrompt }` either way; the discriminant just reflects the chosen
-  // provider so the orchestrator can route the spawn correctly.
+  return { route: 'claude', userPrompt };
+}
+
+/**
+ * Copilot-tuned prompt shape. Uses standard markdown role markers Copilot is
+ * trained to honor, with an explicit `### ANSWER` cue that nudges the model
+ * to produce the cited answer rather than a meta-reply asking for the input.
+ */
+function buildCopilotPrompt(systemText: string, ctx: PromptContext, userQuestion: string): string {
+  const sections: string[] = [];
+  sections.push('### INSTRUCTIONS');
+  sections.push(systemText);
+
+  const attached = renderAttachedBlock(ctx);
+  const retrieved = renderRetrievedBlock(ctx);
+  if (attached || retrieved) {
+    sections.push('### CONTEXT');
+    if (attached) sections.push(attached);
+    if (retrieved) sections.push(retrieved);
+  }
+
+  sections.push('### QUESTION');
+  sections.push(userQuestion);
+  sections.push('### ANSWER');
+  sections.push('(Cite sources as [1], [2]. Use only the context above.)');
+  return sections.join('\n\n');
 }
 
 // ── Citation post-processing ──────────────────────────────────────────────

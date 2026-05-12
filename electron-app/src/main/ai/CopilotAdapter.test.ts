@@ -1,5 +1,23 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CopilotAdapter } from './CopilotAdapter';
+
+// Mock the stdin probe helper. `buildInvocation` is otherwise a pure function
+// of probe result + prompt — no need to spawn or shell out in these tests.
+vi.mock('../utils/spawn-portable', async () => {
+  const actual = await vi.importActual<typeof import('../utils/spawn-portable')>(
+    '../utils/spawn-portable',
+  );
+  return {
+    ...actual,
+    execFilePortableWithStdin: vi.fn(),
+  };
+});
+// Silence the probe-log file writer in tests.
+vi.mock('../utils/copilot-probe-log', () => ({
+  logCopilotProbe: vi.fn().mockResolvedValue(undefined),
+}));
+import { execFilePortableWithStdin } from '../utils/spawn-portable';
+const mockedProbe = execFilePortableWithStdin as unknown as ReturnType<typeof vi.fn>;
 import {
   getCuratedCopilotModels,
   mergeProbedIntoCurated,
@@ -227,5 +245,135 @@ describe('mergeProbedIntoCurated', () => {
     expect(out).toHaveLength(1);
     expect(out[0].id).toBe('experimental-zzz');
     expect(out[0].source).toBe('cli');
+  });
+});
+
+// ─── buildInvocation — argv vs stdin transport routing ─────────────────────
+
+describe('CopilotAdapter.buildInvocation', () => {
+  // Sizable enough to exceed ARGV_SIZE_LIMIT (4096).
+  const BIG_PROMPT = 'a'.repeat(8192);
+
+  beforeEach(() => {
+    mockedProbe.mockReset();
+  });
+
+  describe('copilot-cli backend', () => {
+    const COPILOT_BIN = '/usr/local/bin/copilot';
+
+    it('small prompt -> argv with --prompt, no stdin', async () => {
+      const fresh = new CopilotAdapter();
+      const inv = await fresh.buildInvocation(COPILOT_BIN, 'short prompt', false, {
+        id: 'claude-haiku-4.5',
+        label: 'Claude Haiku 4.5',
+        provider: 'copilot',
+        runIds: { copilotCli: 'claude-haiku-4.5' },
+      });
+      expect(inv.transport).toBe('argv');
+      expect(inv.backendLabel).toBe('copilot-cli');
+      expect(inv.stdin).toBeUndefined();
+      expect(inv.args).toContain('--prompt');
+      expect(inv.args).toContain('short prompt');
+      expect(inv.args).toContain('--model');
+      expect(inv.args).toContain('claude-haiku-4.5');
+      expect(mockedProbe).not.toHaveBeenCalled(); // No probe on argv path.
+    });
+
+    it('large prompt + probe OK -> stdin transport, prompt NOT in argv', async () => {
+      mockedProbe.mockResolvedValueOnce({ stdout: 'OK', stderr: '' });
+      const fresh = new CopilotAdapter();
+      const inv = await fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT, false);
+      expect(inv.transport).toBe('stdin');
+      expect(inv.backendLabel).toBe('copilot-cli');
+      expect(inv.stdin).toBe(BIG_PROMPT);
+      expect(inv.args).toContain('-s');
+      expect(inv.args).not.toContain('--prompt');
+      expect(inv.args.join(' ')).not.toContain(BIG_PROMPT);
+    });
+
+    it('large prompt + probe fails -> throws actionable error', async () => {
+      mockedProbe.mockRejectedValueOnce(new Error('bad'));
+      const fresh = new CopilotAdapter();
+      await expect(fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT, false)).rejects.toThrow(
+        /Copilot CLI on this machine doesn't accept large prompts via stdin/,
+      );
+    });
+
+    it('probe is cached per (backend, binaryPath) — second large call does not re-probe', async () => {
+      mockedProbe.mockResolvedValueOnce({ stdout: 'OK', stderr: '' });
+      const fresh = new CopilotAdapter();
+      await fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT, false);
+      await fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT + 'more', false);
+      expect(mockedProbe).toHaveBeenCalledTimes(1);
+    });
+
+    it('different binaryPath re-probes', async () => {
+      mockedProbe
+        .mockResolvedValueOnce({ stdout: 'OK', stderr: '' })
+        .mockResolvedValueOnce({ stdout: 'OK', stderr: '' });
+      const fresh = new CopilotAdapter();
+      await fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT, false);
+      await fresh.buildInvocation('/opt/homebrew/bin/copilot', BIG_PROMPT, false);
+      expect(mockedProbe).toHaveBeenCalledTimes(2);
+    });
+
+    it('clearModelCache resets the probe cache', async () => {
+      mockedProbe
+        .mockResolvedValueOnce({ stdout: 'OK', stderr: '' })
+        .mockResolvedValueOnce({ stdout: 'OK', stderr: '' });
+      const fresh = new CopilotAdapter();
+      await fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT, false);
+      fresh.clearModelCache();
+      await fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT, false);
+      expect(mockedProbe).toHaveBeenCalledTimes(2);
+    });
+
+    it('continueSession=true appends --continue on argv path', async () => {
+      const fresh = new CopilotAdapter();
+      const inv = await fresh.buildInvocation(COPILOT_BIN, 'short', true);
+      expect(inv.args).toContain('--continue');
+    });
+
+    it('continueSession=true preserved on stdin path', async () => {
+      mockedProbe.mockResolvedValueOnce({ stdout: 'OK', stderr: '' });
+      const fresh = new CopilotAdapter();
+      const inv = await fresh.buildInvocation(COPILOT_BIN, BIG_PROMPT, true);
+      expect(inv.args).toContain('--continue');
+      expect(inv.stdin).toBe(BIG_PROMPT);
+    });
+  });
+
+  describe('gh-models backend', () => {
+    const GH_BIN = '/usr/local/bin/gh';
+
+    it('small prompt -> positional prompt in argv', async () => {
+      const fresh = new CopilotAdapter();
+      const inv = await fresh.buildInvocation(GH_BIN, 'short prompt', false);
+      expect(inv.transport).toBe('argv');
+      expect(inv.backendLabel).toBe('gh-models');
+      expect(inv.args.slice(0, 2)).toEqual(['models', 'run']);
+      expect(inv.args).toContain('short prompt');
+      expect(inv.stdin).toBeUndefined();
+    });
+
+    it('large prompt + probe OK -> positional directive + stdin payload', async () => {
+      mockedProbe.mockResolvedValueOnce({ stdout: 'reply: OK', stderr: '' });
+      const fresh = new CopilotAdapter();
+      const inv = await fresh.buildInvocation(GH_BIN, BIG_PROMPT, false);
+      expect(inv.transport).toBe('stdin');
+      expect(inv.backendLabel).toBe('gh-models');
+      expect(inv.stdin).toBe(BIG_PROMPT);
+      // The positional arg must NOT be the heavy payload — keeps gh out of REPL.
+      expect(inv.args).toContain('Follow the complete IronMic request provided on stdin.');
+      expect(inv.args.join(' ')).not.toContain(BIG_PROMPT);
+    });
+
+    it('large prompt + probe fails -> throws gh-specific actionable error', async () => {
+      mockedProbe.mockRejectedValueOnce(new Error('bad'));
+      const fresh = new CopilotAdapter();
+      await expect(fresh.buildInvocation(GH_BIN, BIG_PROMPT, false)).rejects.toThrow(
+        /GitHub Models CLI on this machine doesn't accept large prompts via stdin/,
+      );
+    });
   });
 });

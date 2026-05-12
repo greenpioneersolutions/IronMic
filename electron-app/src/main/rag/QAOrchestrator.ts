@@ -253,7 +253,10 @@ export async function knowledgeAsk(
       systemOverride = sysMsg?.content;
       llmPrompt = userMsg?.content ?? query;
     } else {
-      llmPrompt = (shaped as any).userPrompt ?? query;
+      // Both ClaudePromptShape and PrependPromptShape (claude | copilot)
+      // expose `userPrompt`. Use a discriminated check so this stays clean
+      // if a future route omits userPrompt.
+      llmPrompt = 'userPrompt' in shaped ? shaped.userPrompt : query;
     }
 
     emit('streaming');
