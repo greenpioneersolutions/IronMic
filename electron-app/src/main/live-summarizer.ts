@@ -39,6 +39,27 @@ import { IPC_CHANNELS } from '../shared/constants';
 const MIN_TRANSCRIPT_WORDS = 15;
 
 /**
+ * Rolling-window cap on transcript words fed into the bullets-pass LLM
+ * call. Without this cap, the live summarizer concatenates the ENTIRE
+ * meeting transcript into every prompt. By minute ~15 the transcript is
+ * 1500–2500 words; CPU-bound local models process input at ~5–15
+ * tokens/s, so each pass starts running 60+ seconds and the live panel
+ * appears to stall.
+ *
+ * 800 words ≈ 5–6 minutes of dense speech ≈ ~1200 tokens. Combined with
+ * the system prompt (~250 tok), MEETING MEMORY (~300 tok), PREVIOUS
+ * BULLETS (~150 tok), user notes (~variable, usually <300 tok), the
+ * total stays under 2 000 input tokens — which keeps a Phi-3-mini /
+ * Llama-3-8B pass under ~10 s on a typical CPU.
+ *
+ * Older transcript content isn't lost: MEETING MEMORY (durable facts)
+ * and PREVIOUS BULLETS (running summary) carry it forward. The window
+ * is only the *active conversation* — anything older has already been
+ * distilled into those two carriers.
+ */
+const LIVE_TRANSCRIPT_WINDOW_WORDS = 800;
+
+/**
  * Sentinel the LLM is instructed to emit when the combined transcript +
  * user-notes input has no substantive content. We detect this in the
  * response and treat it like the "insufficient" state.
@@ -124,6 +145,48 @@ function htmlToPlainText(html: string): string {
 function wordCount(text: string): number {
   if (!text) return 0;
   return text.trim().split(/\s+/).filter(w => w.length > 0).length;
+}
+
+/**
+ * Build a transcript string capped at ~maxWords from the most-recent end
+ * of `segments`. Walks segments in reverse so we keep the LATEST speech
+ * (the live ticker is about "what's happening now" — older content is
+ * already in the running summary + memory).
+ *
+ * Returns:
+ *   - `recent`: the bounded transcript text (most-recent N words).
+ *   - `truncated`: true if any segments were left out due to the cap.
+ *     The caller uses this to add a brief marker so the LLM knows the
+ *     window is bounded (and doesn't try to claim it can "see" the
+ *     entire meeting in this prompt).
+ */
+function buildRecentTranscript(
+  segments: TranscriptSegment[],
+  maxWords: number,
+): { recent: string; truncated: boolean } {
+  if (segments.length === 0) return { recent: '', truncated: false };
+  const kept: string[] = [];
+  let words = 0;
+  let truncated = false;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const text = segments[i].text;
+    const w = wordCount(text);
+    if (words + w > maxWords && kept.length > 0) {
+      // Including this segment would exceed the cap and we already
+      // have at least one segment — stop here.
+      truncated = true;
+      break;
+    }
+    kept.push(text);
+    words += w;
+    if (words >= maxWords) {
+      // We hit the cap on this segment. Anything earlier is truncated.
+      if (i > 0) truncated = true;
+      break;
+    }
+  }
+  kept.reverse();
+  return { recent: kept.join(' '), truncated };
 }
 
 /** Read the user's live notes (plain text) from the session's structured_output. */
@@ -448,7 +511,25 @@ class LiveSummarizerManager {
     // Build a single unified MEETING CONTEXT block. The transcript and the
     // typed annotations are both first-class meeting content; the LLM weaves
     // them together rather than calling out where each line came from.
-    const transcriptBody = fullTranscript.trim() || '(no substantive spoken content yet)';
+    //
+    // CRITICAL — rolling window: use only the LAST
+    // LIVE_TRANSCRIPT_WINDOW_WORDS words of transcript, not the full
+    // meeting transcript. Older content is carried forward by MEETING
+    // MEMORY + PREVIOUS BULLETS, both of which are appended below. This
+    // keeps the prompt size roughly constant as the meeting grows, so a
+    // 60-minute meeting's pass is the same speed as a 5-minute meeting's
+    // pass. Without this, the live summary stalls past ~15 minutes
+    // because each LLM call exceeds the CPU's per-pass budget.
+    const { recent: recentTranscript, truncated } = buildRecentTranscript(
+      this.segmentsBuffer,
+      LIVE_TRANSCRIPT_WINDOW_WORDS,
+    );
+    const truncationNote = truncated
+      ? '(showing the most-recent stretch; earlier content is summarized below in PREVIOUS BULLETS and MEETING MEMORY)\n'
+      : '';
+    const transcriptBody = recentTranscript.trim()
+      ? truncationNote + recentTranscript
+      : '(no substantive spoken content yet)';
     const contextBody = userNotes.trim()
       ? `${transcriptBody}\n\n${userNotes.trim()}`
       : transcriptBody;
@@ -587,7 +668,7 @@ class LiveSummarizerManager {
    */
   private async maybeRefreshMemory(
     sessionId: string,
-    fullTranscript: string,
+    _fullTranscript: string,
     userNotes: string,
     snapshotCount: number,
     snapshotUserNotes: string,
@@ -602,7 +683,6 @@ class LiveSummarizerManager {
     // last memory pass. lastMemorizedCount==0 means we've never done one
     // — always do the first one once we have substantive bullets.
     const isFirstMemoryPass = this.lastMemorizedCount === 0 && !this.currentMemory;
-    const newSegmentsSinceMemory = Math.max(0, snapshotCount - this.lastMemorizedCount);
     const newWordsSinceMemory = this.segmentsBuffer
       .slice(this.lastMemorizedCount, snapshotCount)
       .reduce((sum, s) => sum + wordCount(s.text), 0);
@@ -615,17 +695,33 @@ class LiveSummarizerManager {
     const resolved = resolveActiveChatModel(native);
     if (!resolved) return;
 
-    const transcriptBody = fullTranscript.trim() || '(no substantive spoken content yet)';
+    // Memory pass uses ONLY the delta-since-last-memory transcript (not
+    // the full meeting). Same rationale as the bullets-pass rolling
+    // window: as the meeting grows, this keeps the memory pass O(delta)
+    // instead of O(meeting length). Older facts are already in
+    // `currentMemory` (passed in as PREVIOUS MEMORY below); the LLM is
+    // instructed to merge new content into the existing memory rather
+    // than rebuilding from scratch.
+    //
+    // On the first memory pass (currentMemory empty), the delta is the
+    // entire meeting so far — but in practice that's also bounded because
+    // the bullets-pass gate requires hasSubstantiveSummary first, which
+    // typically lands within the first 2–3 minutes. Even a 60-min meeting
+    // hits the first memory pass after ~2 min of speech, so the delta is
+    // small and the worst case is well-bounded.
+    const deltaSegments = this.segmentsBuffer.slice(this.lastMemorizedCount, snapshotCount);
+    const deltaTranscript = deltaSegments.map((s) => s.text).join(' ');
+    const transcriptBody = deltaTranscript.trim() || '(no new spoken content since the last memory pass)';
     const contextBody = userNotes.trim()
       ? `${transcriptBody}\n\n${userNotes.trim()}`
       : transcriptBody;
-    const contextSection = `MEETING CONTEXT:\n${contextBody}`;
+    const contextSection = `NEW MEETING CONTEXT (since the last memory pass):\n${contextBody}`;
     const previousMemorySection = this.currentMemory
-      ? `\n\nPREVIOUS MEMORY (carry forward unless contradicted):\n${this.currentMemory}`
+      ? `\n\nPREVIOUS MEMORY (carry forward unless contradicted by the new context above):\n${this.currentMemory}`
       : '';
     const memoryPrompt =
       `${contextSection}${previousMemorySection}\n\n` +
-      `Produce the updated MEETING MEMORY block now, using EXACTLY the five labeled lines/blocks specified in the system prompt.`;
+      `Produce the updated MEETING MEMORY block now by MERGING the previous memory with the new context above, using EXACTLY the five labeled lines/blocks specified in the system prompt. Preserve all earlier facts from PREVIOUS MEMORY unless the new context contradicts them.`;
 
     const controller = new AbortController();
     try {

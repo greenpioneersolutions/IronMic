@@ -855,6 +855,22 @@ export function MeetingPage() {
         } else if (liveInsufficient && (!liveSummary || !liveSummary.trim())) {
           await finalizeInsufficient(sessionId, 'insufficient');
         } else {
+          // Two-phase finalize:
+          //   Phase A (sub-second) — persist the live summary as an
+          //     instantly-readable AI summary with enhancementState
+          //     'enhancing'. The card immediately flips to "Notes ready"
+          //     + "Enhancing…" so the user sees value at end-of-meeting
+          //     without waiting on the heavy structured pass.
+          //   Phase B (background) — same template-driven structured
+          //     notes pipeline we ran before, but it now UPGRADES from
+          //     the live-summary baseline rather than being the first
+          //     thing the user sees.
+          // The live summary is always present here because the gates
+          // above (empty / insufficient) have already filtered out the
+          // cases where it would be empty.
+          await persistInstantSummary(sessionId, liveSummary || '');
+          await loadSessions();
+
           // Always run the structured pass through a template — never the
           // flat-bullets plainSummarize path. If `template` is null (rare:
           // first-launch race before the meeting_default_template effect
@@ -1003,6 +1019,69 @@ export function MeetingPage() {
    * "insufficient" (some speech but not enough to summarize faithfully).
    * In both cases we preserve any userNotes and skip the LLM.
    */
+  /**
+   * Phase A of the instant-summary flow: persist the live summary as a
+   * readable AI summary the user can see immediately after End Meeting,
+   * marked enhancementState='enhancing' so the card / detail page shows
+   * an "Enhancing…" affordance while the heavy template pass runs in
+   * the background.
+   *
+   * Why this exists separately from generateStructuredNotes: the heavy
+   * pass takes 10–60 s (long meetings, slow LLM). Showing a blank
+   * "Processing…" card for that long after the user already heard the
+   * live summary during the meeting is a regression in perceived speed.
+   * This function lays down the live-summary baseline in <100 ms so
+   * the card / detail page renders something useful immediately.
+   *
+   * The structured pass that runs next is the same code as before; the
+   * only difference is it now UPGRADES the structured_output rather
+   * than being the first writer.
+   */
+  const persistInstantSummary = async (
+    sessionId: string,
+    liveSummary: string,
+  ) => {
+    const trimmed = liveSummary.trim();
+    if (!trimmed) return; // nothing to lay down; caller's existing path will handle
+
+    try {
+      // Preserve userNotes, title, etc. from any prior write.
+      let existing: any = {};
+      try {
+        const raw = await window.ironmic.meetingGet(sessionId);
+        if (raw) {
+          const session = JSON.parse(raw);
+          if (session?.structured_output) {
+            try { existing = JSON.parse(session.structured_output) || {}; }
+            catch { /* ignore */ }
+          }
+        }
+      } catch { /* ignore */ }
+
+      const payload: any = {
+        ...existing,
+        processingState: 'done',
+        // Treat the live summary as a single "Summary" section so the
+        // detail page's section renderer has something to show. The
+        // enhanced pass below will overwrite `sections` with template-
+        // shaped sections.
+        sections: [{ key: 'summary', title: 'Summary', content: trimmed }],
+        plainSummary: trimmed,
+        // New field that drives the "Enhancing…" affordance. Cleared
+        // (or set to 'enhanced') by generateStructuredNotes when the
+        // heavy pass completes.
+        enhancementState: 'enhancing',
+        enhancementStartedAt: Date.now(),
+      };
+
+      await window.ironmic.meetingSetStructuredOutput(sessionId, JSON.stringify(payload));
+    } catch (err) {
+      // Best-effort. If this fails, the user just sees "Processing…"
+      // until the heavy pass finishes — same as the old behavior.
+      console.warn('[MeetingPage] persistInstantSummary failed:', err);
+    }
+  };
+
   const finalizeInsufficient = async (
     sessionId: string,
     reason: 'empty' | 'insufficient',
@@ -1174,16 +1253,46 @@ export function MeetingPage() {
     durationSec: number,
     template: MeetingTemplate | null,
   ) => {
-    // ── Step 0: Persist the transcript + processingState BEFORE calling the LLM.
-    // This is the key durability fix: if the app crashes or is closed mid-generation,
-    // the next startup can find this session, read the stored transcript, and retry.
-    // We also notify the main process so it can warn on window close.
+    // ── Step 0: Persist a recovery checkpoint BEFORE calling the LLM.
+    // This is the durability anchor: if the app crashes or is closed
+    // mid-enhancement, the next launch can find this session, read the
+    // stored transcript, and retry.
+    //
+    // Important change from the legacy flow: we MERGE this checkpoint
+    // with the existing structured_output (which Phase A persistInstantSummary
+    // wrote with the live-summary baseline) instead of WIPING it. The
+    // previous code set `processingState: 'generating'` with blank
+    // sections/plainSummary — that would erase the live summary the user
+    // just saw and flip the card back to "Processing…", defeating the
+    // instant-summary UX. Now we keep the live summary visible and only
+    // add the recovery-keys + enhancementState tag.
+    let existingBeforeRecovery: any = {};
+    try {
+      const raw = await window.ironmic.meetingGet(sessionId);
+      if (raw) {
+        const session = JSON.parse(raw);
+        if (session?.structured_output) {
+          try { existingBeforeRecovery = JSON.parse(session.structured_output) || {}; }
+          catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
     try {
       await window.ironmic.meetingSetStructuredOutput(sessionId, JSON.stringify({
-        processingState: 'generating',
-        sections: [],
-        plainSummary: '',
-        // Store the raw transcript so recovery is possible on restart
+        // Preserve everything the live-summary phase wrote (title,
+        // sections, plainSummary, userNotes, etc.) so the card / detail
+        // page keeps showing the baseline summary while enhancement runs.
+        ...existingBeforeRecovery,
+        // Keep processingState as whatever the live-summary phase set
+        // (typically 'done'); fall back to 'generating' for legacy
+        // callers that skipped Phase A (regenerate-from-detail-page).
+        processingState: existingBeforeRecovery.processingState ?? 'generating',
+        // New: explicit enhancement-state. This is the recovery key the
+        // sweep below watches for (in addition to the legacy
+        // processingState === 'generating').
+        enhancementState: 'enhancing',
+        enhancementStartedAt: existingBeforeRecovery.enhancementStartedAt ?? Date.now(),
+        // Store the raw transcript so recovery is possible on restart.
         _recoveryTranscript: transcript,
         _recoveryTemplateId: template?.id ?? null,
         _recoveryDurationSec: durationSec,
@@ -1269,7 +1378,17 @@ export function MeetingPage() {
       }
 
       try {
-        await window.ironmic.meetingSetStructuredOutput(sessionId, JSON.stringify(structured));
+        // Tag the enhanced result so the card / detail page can show an
+        // "Enhanced" indicator (or just clear the "Enhancing…" badge).
+        // Also strip the recovery-only fields — they're no longer
+        // needed once enhancement has succeeded.
+        const enhancedPayload: any = { ...structured };
+        enhancedPayload.enhancementState = 'enhanced';
+        enhancedPayload.enhancementCompletedAt = Date.now();
+        delete enhancedPayload._recoveryTranscript;
+        delete enhancedPayload._recoveryTemplateId;
+        delete enhancedPayload._recoveryDurationSec;
+        await window.ironmic.meetingSetStructuredOutput(sessionId, JSON.stringify(enhancedPayload));
       } catch (err) {
         console.error('[MeetingPage] Failed to save structured output:', err);
       }
@@ -1278,6 +1397,40 @@ export function MeetingPage() {
         await window.ironmic.meetingEnd(sessionId, 1, summaryForColumn, '', durationSec, '');
       } catch (err) {
         console.error('[MeetingPage] Failed to finalize meeting:', err);
+      }
+    } catch (err) {
+      // Enhancement failed (LLM error, template error, etc.). Preserve
+      // the live-summary baseline so the user still sees something
+      // useful; mark enhancementState='failed' so the detail page can
+      // offer an "Enhance" retry button. The processingState stays
+      // 'done' from Phase A — there IS valid output, it just isn't the
+      // template-formatted one.
+      console.error('[MeetingPage] Enhancement failed:', err);
+      try {
+        const raw = await window.ironmic.meetingGet(sessionId);
+        let existing: any = {};
+        if (raw) {
+          const session = JSON.parse(raw);
+          if (session?.structured_output) {
+            try { existing = JSON.parse(session.structured_output) || {}; }
+            catch { /* ignore */ }
+          }
+        }
+        // Preserve the live-summary sections/plainSummary written by
+        // Phase A. Only update the enhancement state.
+        const failedPayload: any = {
+          ...existing,
+          enhancementState: 'failed',
+          enhancementFailedAt: Date.now(),
+        };
+        // Strip recovery keys — the user will trigger retry manually
+        // via the Enhance button, NOT via the auto-recovery sweep.
+        delete failedPayload._recoveryTranscript;
+        delete failedPayload._recoveryTemplateId;
+        delete failedPayload._recoveryDurationSec;
+        await window.ironmic.meetingSetStructuredOutput(sessionId, JSON.stringify(failedPayload));
+      } catch (writeErr) {
+        console.error('[MeetingPage] Failed to write enhancement-failed marker:', writeErr);
       }
     } finally {
       // Always release the processing-active flag so the quit guard doesn't
@@ -1307,7 +1460,17 @@ export function MeetingPage() {
           : null;
       } catch { /* malformed JSON, skip */ }
 
-      if (!parsed || parsed.processingState !== 'generating') continue;
+      // Recovery key: either the legacy `processingState === 'generating'`
+      // (sessions that were interrupted mid-enhancement BEFORE Phase A
+      // landed — pre-instant-summary flow) OR the new
+      // `enhancementState === 'enhancing'` (interrupted mid-enhancement
+      // AFTER Phase A laid down the live-summary baseline). Both paths
+      // run the same generateStructuredNotes pipeline; the only
+      // difference is that the new-flow recovery preserves the visible
+      // live summary while it retries.
+      const isLegacyStuck = parsed.processingState === 'generating';
+      const isEnhancementStuck = parsed.enhancementState === 'enhancing';
+      if (!parsed || (!isLegacyStuck && !isEnhancementStuck)) continue;
 
       const recoveryTranscript: string | undefined = parsed._recoveryTranscript;
       if (!recoveryTranscript || recoveryTranscript.trim().length < 20) {

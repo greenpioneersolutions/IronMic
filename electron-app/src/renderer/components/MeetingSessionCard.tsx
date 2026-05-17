@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Clock, Users, Trash2, ChevronDown, ChevronRight, Mic, Pencil, Loader2, FileText, Check } from 'lucide-react';
+import { Clock, Users, Trash2, ChevronDown, ChevronRight, Mic, Pencil, Loader2, FileText, Check, Sparkles } from 'lucide-react';
 import { Card } from './ui';
 import { AddToNotebookMenu } from './AddToNotebookMenu';
 import { useMeetingStore } from '../stores/useMeetingStore';
@@ -52,15 +52,29 @@ export function MeetingSessionCard({
   // Try to parse structured output
   let structuredSections: Array<{ key: string; title: string; content: string }> | null = null;
   let processingState: string | null = null;
+  let enhancementState: string | null = null;
   let parsedStructured: any = null;
   if (session.structured_output) {
     try {
       parsedStructured = JSON.parse(session.structured_output);
       structuredSections = parsedStructured.sections || null;
       processingState = parsedStructured.processingState ?? null;
+      // Two-phase finalize introduced an enhancement layer on top of the
+      // basic processingState. After Phase A, processingState='done' AND
+      // enhancementState='enhancing' — meaning the user can READ the live
+      // summary now while the heavier template pass runs in background.
+      // 'enhanced' = template pass succeeded. 'failed' = template pass
+      // failed but the live summary baseline is still readable.
+      enhancementState = parsedStructured.enhancementState ?? null;
     } catch { /* fallback to summary */ }
   }
 
+  // "Processing…" should only show for the legacy old-style mid-generation
+  // state OR when we have nothing readable yet. Once Phase A has laid down
+  // the live summary, the card shows "Notes ready" + "Enhancing…" so the
+  // user sees value immediately. Without this guard the card would flip
+  // back to "Processing…" during the enhancement pass and feel slower than
+  // before despite the optimization.
   const isProcessing = processingMeetings.includes(session.id) || processingState === 'generating';
   const isEmpty = processingState === 'empty';
   const isInsufficient = processingState === 'insufficient';
@@ -68,6 +82,7 @@ export function MeetingSessionCard({
   // every retry (e.g. Copilot CLI rejected large prompts AND local LLM
   // unavailable). Distinct from `'empty'` so the card copy stays honest.
   const isFailed = processingState === 'failed';
+  const isEnhancing = enhancementState === 'enhancing' && !isProcessing && !isEmpty && !isFailed;
   // Notes are "done" when the LLM finished and produced at least one section or a plainSummary.
   const hasSummary = !!(
     (structuredSections && structuredSections.length > 0) ||
@@ -173,6 +188,21 @@ export function MeetingSessionCard({
                 <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded">
                   <FileText className="w-2.5 h-2.5" />
                   Notes ready
+                </span>
+              )}
+              {/* "Enhancing…" — Phase B (background template pass) is
+                  running. The user can already read the live-summary
+                  baseline; this badge tells them an upgraded version is
+                  on its way. Distinct from "Processing…" both visually
+                  (accent vs amber) AND semantically (something IS
+                  readable; we're just polishing it). */}
+              {isEnhancing && (
+                <span
+                  className="flex items-center gap-1 text-[10px] text-iron-accent-light bg-iron-accent/10 border border-iron-accent/20 px-1.5 py-0.5 rounded"
+                  title="Adding template formatting and context. The basic summary is already available."
+                >
+                  <Sparkles className="w-2.5 h-2.5 animate-pulse" />
+                  Enhancing…
                 </span>
               )}
               {isEmpty && !isProcessing && (

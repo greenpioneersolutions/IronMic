@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Clock, Users, ChevronDown, ChevronRight, Pencil, Save, X, Loader2, RefreshCw, History, Mic, MicOff, Volume2, Pause, Play, Users as UsersIcon } from 'lucide-react';
+import { ArrowLeft, Clock, Users, ChevronDown, ChevronRight, Pencil, Save, X, Loader2, RefreshCw, History, Mic, MicOff, Volume2, Pause, Play, Users as UsersIcon, Sparkles } from 'lucide-react';
 import { type Editor } from '@tiptap/react';
 import { MeetingTranscriptPanel, type TranscriptSegment } from './MeetingTranscriptPanel';
 import { MeetingNotesPanel } from './MeetingNotesPanel';
@@ -575,6 +575,19 @@ export function MeetingDetailPage({ sessionId, onBack, onUpdated }: Props) {
   // because audio WAS captured — the user should see "Summary unavailable"
   // and the Regenerate button below, not "No audio captured."
   const isFailed = processingState === 'failed';
+  // Two-phase finalize: enhancementState is 'enhancing' while the template
+  // pass runs over the live-summary baseline; 'enhanced' on success;
+  // 'failed' if the template pass exhausted retries (the live summary
+  // baseline is still readable — show an "Enhance" retry button).
+  const enhancementState = (() => {
+    if (!session?.structured_output) return null;
+    try {
+      const parsed = JSON.parse(session.structured_output);
+      return parsed?.enhancementState ?? null;
+    } catch { return null; }
+  })();
+  const isEnhancing = enhancementState === 'enhancing' && !isProcessing && !isEmpty && !isFailed;
+  const isEnhancementFailed = enhancementState === 'failed' && !isProcessing && !isEmpty && !isFailed;
   const titleText = extractTitle(session);
 
   // ── Derived state for regenerate / history UI ──
@@ -666,6 +679,30 @@ export function MeetingDetailPage({ sessionId, onBack, onUpdated }: Props) {
                     Summary unavailable
                   </span>
                 )}
+                {/* Two-phase finalize indicators. "Enhancing…" — Phase B
+                    template pass is running in the background; the user
+                    can already read the basic summary below. "Enhanced" —
+                    the upgraded version is ready (no badge, the upgrade
+                    is just visible in the body). "Enhancement failed" —
+                    the user can click Enhance below to retry the
+                    template pass. */}
+                {isEnhancing && (
+                  <span
+                    className="flex items-center gap-1 text-[10px] text-iron-accent-light bg-iron-accent/10 border border-iron-accent/20 px-1.5 py-0.5 rounded"
+                    title="Adding template formatting and context. The basic summary is already available below."
+                  >
+                    <Sparkles className="w-2.5 h-2.5 animate-pulse" />
+                    Enhancing…
+                  </span>
+                )}
+                {isEnhancementFailed && (
+                  <span
+                    className="text-[10px] text-iron-text-muted bg-iron-surface-hover px-1.5 py-0.5 rounded"
+                    title="The template-formatted version couldn't be generated. The basic summary is available below; click Enhance to retry."
+                  >
+                    Basic summary only
+                  </span>
+                )}
               </div>
             )}
             <div className="flex items-center gap-2 text-[11px] text-iron-text-muted">
@@ -734,6 +771,29 @@ export function MeetingDetailPage({ sessionId, onBack, onUpdated }: Props) {
                   <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[9px] font-medium bg-iron-accent/20 text-iron-accent-light rounded-full flex items-center justify-center">
                     {versions.length}
                   </span>
+                </button>
+              )}
+              {/* "Enhance" retry — only visible when enhancement previously
+                  failed. One-click rerun of the template pass using the
+                  current/persisted template; no modal needed (the modal
+                  is for picking a different template, which is what
+                  Regenerate is for). Reuses the same handleRegenerate
+                  pipeline so error handling + history snapshot all
+                  behave the same. */}
+              {isEnhancementFailed && (
+                <button
+                  onClick={() => {
+                    void handleRegenerate({
+                      template: currentTemplate,
+                      disposition: 'discard',
+                    });
+                  }}
+                  disabled={!canRegenerate}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-iron-accent/15 text-iron-accent-light rounded-lg border border-iron-accent/20 hover:bg-iron-accent/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Retry the template-formatted enhancement pass"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Enhance
                 </button>
               )}
               <button
